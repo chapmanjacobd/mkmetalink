@@ -41,3 +41,5 @@ Flags:
 - [RFC 5854 - The Metalink Download Description Format](https://tools.ietf.org/html/rfc5854)
 - [BEP 19 - WebSeed - HTTP/FTP Seeding](http://www.bittorrent.org/beps/bep_0019.html)
 - [aria2 - Command-line download utility with Metalink support](https://aria2.github.io/)
+
+![Piece size calculation](./pieces.png)
