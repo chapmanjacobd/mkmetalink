@@ -1,4 +1,4 @@
-module github.com/chapmanjacobd/sqlite-typecaster
+module github.com/chapmanjacobd/mkmetalink
 
 go 1.25.1
 
