@@ -125,8 +125,8 @@ type MetalinkURL struct {
 }
 
 type MetaSignature struct {
-	Type  string `xml:"type,attr,omitempty"`
-	Value string `xml:",chardata"`
+	Mediatype string `xml:"mediatype,attr"`
+	Value     string `xml:",chardata"`
 }
 
 // ---------- Torrent structures (bencode) ----------
@@ -154,7 +154,7 @@ type TorrentFileInfo struct {
 var CLI struct {
 	Path    string   `arg:"" name:"path" help:"File or directory to package." type:"path"`
 	Mirrors []string `arg:"" name:"mirrors" optional:"" help:"HTTPS mirrors (if directory: base URLs)."`
-	PGPKey  string   `help:"If set, pass this GPG --local-user (key id) when signing." optional:""`
+	PGPUser string   `help:"If set, pass this GPG --local-user (key id) to sign." optional:"" aliases:"pgp,gpg,sign"`
 	OutDir  string   `help:"Optional output directory for generated files. Default: input's parent directory." short:"o" optional:""`
 	Tracker string   `help:"Tracker URL for generated torrent's announce (default privtracker)." default:"https://privtracker.com/metalink/announce"`
 }
@@ -489,7 +489,11 @@ func main() {
 			// For single-file torrents, mirrors should be full URLs to the file
 			tor.URLList = make([]string, len(CLI.Mirrors))
 			for i, m := range CLI.Mirrors {
-				tor.URLList[i] = strings.TrimRight(m, "/") + "/" + baseName
+				if !strings.HasSuffix(m, baseName) {
+					tor.URLList[i] = m
+				} else {
+					tor.URLList[i] = strings.TrimRight(m, "/") + "/" + baseName
+				}
 			}
 		}
 	}
@@ -528,14 +532,14 @@ func main() {
 		log.Fatalf("write meta4: %v", err)
 	}
 
-	if CLI.PGPKey != "" {
-		sig, err := pgpDetachedArmorSign(metaPath, CLI.PGPKey)
+	if CLI.PGPUser != "" {
+		sig, err := pgpDetachedArmorSign(metaPath, CLI.PGPUser)
 		if err != nil {
 			log.Fatalf("pgp sign failed: %v", err)
 		}
 		meta.Signature = &MetaSignature{
-			Type:  "pgp",
-			Value: sig,
+			Mediatype: "application/pgp-signature",
+			Value:     sig,
 		}
 		if err := writeMetaFile(metaPath, meta); err != nil {
 			log.Fatalf("write meta4 with signature: %v", err)
@@ -566,11 +570,8 @@ func writeMetaFile(path string, m Metalink) error {
 	return os.WriteFile(path, out, 0o644)
 }
 
-func pgpDetachedArmorSign(filePath string, key string) (string, error) {
-	args := []string{"--armor", "--detach-sign", "--output", "-", filePath}
-	if key != "" {
-		args = append([]string{"--local-user", key}, args...)
-	}
+func pgpDetachedArmorSign(filePath string, keyname string) (string, error) {
+	args := []string{"--local-user", keyname, "--armor", "--detach-sign", "--output", "-", filePath}
 
 	cmd := exec.Command("gpg", args...)
 	cmd.Stderr = os.Stderr
