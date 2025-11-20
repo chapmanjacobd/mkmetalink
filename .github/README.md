@@ -26,14 +26,18 @@ Generated:
 Usage: mkmetalink <path> [<mirrors> ...] [flags]
 
 Arguments:
-  <path>             File or directory to package.
-  [<mirrors> ...]    HTTPS mirrors (if directory: base URLs).
+  <path>             File or directory to package
+  [<mirrors> ...]    HTTPS mirrors (if directory: base URLs)
 
 Flags:
-  -h, --help                                                   Show context-sensitive help.
-      --pgp-key=STRING                                         If set, pass this GPG --local-user (key id) when signing.
-  -o, --out-dir=STRING                                         Optional output directory for generated files. Default: input's parent directory.
-      --tracker="https://privtracker.com/metalink/announce"    Tracker URL for generated torrent's announce (default privtracker).
+  -h, --help              Show context-sensitive help.
+      --sign=STRING       If set, pass this GPG --local-user (key id) to sign
+  -o, --out-dir=STRING    Optional output directory for generated files.
+                          Default: input file's parent directory or input
+                          directory
+      --tracker="https://privtracker.com/metalink/announce"
+                          Tracker URL for generated torrent's announce (default
+                          privtracker)
 ```
 
 ## See Also

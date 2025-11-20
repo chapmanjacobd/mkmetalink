@@ -152,11 +152,11 @@ type TorrentFileInfo struct {
 }
 
 var CLI struct {
-	Path    string   `arg:"" name:"path" help:"File or directory to package." type:"path"`
-	Mirrors []string `arg:"" name:"mirrors" optional:"" help:"HTTPS mirrors (if directory: base URLs)."`
-	PGPUser string   `help:"If set, pass this GPG --local-user (key id) to sign." optional:"" aliases:"pgp,gpg,sign"`
-	OutDir  string   `help:"Optional output directory for generated files. Default: input's parent directory." short:"o" optional:""`
-	Tracker string   `help:"Tracker URL for generated torrent's announce (default privtracker)." default:"https://privtracker.com/metalink/announce"`
+	Path    string   `arg:"" name:"path" help:"File or directory to package" type:"path"`
+	Mirrors []string `arg:"" name:"mirrors" optional:"" help:"HTTPS mirrors (if directory: base URLs)"`
+	Sign    string   `help:"If set, pass this GPG --local-user (key id) to sign" optional:"" aliases:"pgp,gpg"`
+	OutDir  string   `help:"Optional output directory for generated files. Default: input file's parent directory or input directory" short:"o" optional:""`
+	Tracker string   `help:"Tracker URL for generated torrent's announce (default privtracker)" default:"https://privtracker.com/metalink/announce"`
 }
 
 type FileInfo struct {
@@ -532,8 +532,8 @@ func main() {
 		log.Fatalf("write meta4: %v", err)
 	}
 
-	if CLI.PGPUser != "" {
-		sig, err := pgpDetachedArmorSign(metaPath, CLI.PGPUser)
+	if CLI.Sign != "" {
+		sig, err := pgpDetachedArmorSign(metaPath, CLI.Sign)
 		if err != nil {
 			log.Fatalf("pgp sign failed: %v", err)
 		}
