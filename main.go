@@ -110,6 +110,7 @@ type MetaHash struct {
 }
 
 type MetaPieces struct {
+	Type   string          `xml:"type,attr"`
 	Length int64           `xml:"length,attr"`
 	Hashes []MetaPieceHash `xml:"hash"`
 }
@@ -152,11 +153,12 @@ type TorrentFileInfo struct {
 }
 
 var CLI struct {
-	Path    string   `arg:"" name:"path" help:"File or directory to package" type:"path"`
-	Mirrors []string `arg:"" name:"mirrors" optional:"" help:"HTTPS mirrors (if directory: base URLs)"`
 	Sign    string   `help:"If set, pass this GPG --local-user (key id) to sign" optional:"" aliases:"pgp,gpg"`
-	OutDir  string   `help:"Optional output directory for generated files. Default: input file's parent directory or input directory" short:"o" optional:""`
 	Tracker string   `help:"Tracker URL for generated torrent's announce (default privtracker)" default:"https://privtracker.com/metalink/announce"`
+	OutDir  string   `help:"Optional output directory for generated files. Default: input file's parent directory or input directory" short:"o" optional:""`
+	Mirrors []string `name:"mirrors" short:"m" help:"HTTPS mirrors (if directory: base URLs)"`
+
+	Path string `arg:"" name:"path" help:"File or directory to package" type:"path"`
 }
 
 type FileInfo struct {
@@ -438,13 +440,16 @@ func main() {
 			}
 		}
 
+		relPath := filepath.ToSlash(fi.RelPath)
+		if info.IsDir() {
+			relPath = baseName + "/" + filepath.ToSlash(fi.RelPath)
+		}
+
 		var urls []MetalinkURL
 		for i, m := range CLI.Mirrors {
-			var u string
-			if info.IsDir() {
-				u = strings.TrimRight(m, "/") + "/" + filepath.ToSlash(fi.RelPath)
-			} else {
-				u = strings.TrimRight(m, "/") + "/" + filepath.ToSlash(fi.RelPath)
+			u := strings.TrimRight(m, "/") + "/" + relPath
+			if !info.IsDir() && strings.HasSuffix(m, fi.RelPath) {
+				u = m
 			}
 			urls = append(urls, MetalinkURL{
 				Priority: i + 1,
@@ -453,13 +458,14 @@ func main() {
 		}
 
 		mf := MetalinkFile{
-			Name: fi.RelPath,
+			Name: relPath,
 			Size: r.Size,
 			Hash: MetaHash{
 				Type:  "sha-256",
 				Value: r.FileSHA256,
 			},
 			Pieces: MetaPieces{
+				Type:   "sha-256",
 				Length: pieceSize,
 				Hashes: metaPieceHashes,
 			},
@@ -481,6 +487,7 @@ func main() {
 	if len(CLI.Mirrors) > 0 {
 		if info.IsDir() {
 			// For multi-file torrents, mirrors should be base URLs
+			// the "url-list" must be a root folder where a client could add the "name" and "path/file"
 			tor.URLList = make([]string, len(CLI.Mirrors))
 			for i, m := range CLI.Mirrors {
 				tor.URLList[i] = strings.TrimRight(m, "/") + "/"
@@ -489,7 +496,7 @@ func main() {
 			// For single-file torrents, mirrors should be full URLs to the file
 			tor.URLList = make([]string, len(CLI.Mirrors))
 			for i, m := range CLI.Mirrors {
-				if !strings.HasSuffix(m, baseName) {
+				if strings.HasSuffix(m, baseName) {
 					tor.URLList[i] = m
 				} else {
 					tor.URLList[i] = strings.TrimRight(m, "/") + "/" + baseName

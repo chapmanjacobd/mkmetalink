@@ -11,13 +11,30 @@ go install github.com/chapmanjacobd/mkmetalink@latest
 ## Example
 
 ```sh
-$ mkmetalink /mnt/d/archive/text/dumps.wikimedia.org/relevance.zip https://example.com/ https://example.com/second_mirror/
+$ mkmetalink -m https://example.com/ -m https://example.com/second_mirror/ ./dumps.wikimedia.org/relevance.zip
 Total size: 222.9 MiB, piece size: 256.0 KiB, 1 files
   [1/1] relevance.zip
 
 Generated:
-/mnt/d/archive/text/dumps.wikimedia.org/relevance.zip.meta4
-/mnt/d/archive/text/dumps.wikimedia.org/relevance.zip.torrent
+./dumps.wikimedia.org/relevance.zip.meta4
+./dumps.wikimedia.org/relevance.zip.torrent
+```
+
+## Folders / Relative paths
+
+```sh
+$ mkmetalink -m https://example.com/live/ ./2026-01-01/
+```
+
+Will create a metalink file that references multiple files. eg:
+
+```xml
+  <file name="2026-01-01/docs.txt">
+    <url priority="1">https://example.com/live/2026-01-01/docs.txt</url>
+    ...
+  <file name="2026-01-01/v1/data">
+    <url priority="1">https://example.com/live/2026-01-01/v1/data</url>
+    ...
 ```
 
 ## Help
@@ -26,18 +43,14 @@ Generated:
 Usage: mkmetalink <path> [<mirrors> ...] [flags]
 
 Arguments:
-  <path>             File or directory to package
-  [<mirrors> ...]    HTTPS mirrors (if directory: base URLs)
+  <path>    File or directory to package
 
 Flags:
-  -h, --help              Show context-sensitive help.
-      --sign=STRING       If set, pass this GPG --local-user (key id) to sign
-  -o, --out-dir=STRING    Optional output directory for generated files.
-                          Default: input file's parent directory or input
-                          directory
-      --tracker="https://privtracker.com/metalink/announce"
-                          Tracker URL for generated torrent's announce (default
-                          privtracker)
+  -h, --help                                                   Show context-sensitive help.
+      --sign=STRING                                            If set, pass this GPG --local-user (key id) to sign
+      --tracker="https://privtracker.com/metalink/announce"    Tracker URL for generated torrent's announce (default privtracker)
+  -o, --out-dir=STRING                                         Optional output directory for generated files. Default: input file's parent directory or input directory
+  -m, --mirrors=MIRRORS,...                                    HTTPS mirrors (if directory: base URLs)
 ```
 
 ## See Also
