@@ -45,7 +45,7 @@ func calculatePieceSize(total int64) int64 {
 	currentPieces := float64(total) / float64(current)
 	if currentPieces > N_THRESHOLD {
 		target := float64(total) / N_THRESHOLD
-		stepped := int64(math.Pow(2, math.Floor(math.Log2(target))))
+		stepped := int64(math.Pow(2, math.Ceil(math.Log2(target))))
 		if stepped < P_CAP {
 			stepped = P_CAP
 		}
@@ -142,7 +142,7 @@ type Torrent struct {
 
 type TorrentInfo struct {
 	PieceLength int64             `bencode:"piece length"`
-	Pieces      []byte            `bencode:"pieces"`
+	Pieces      string            `bencode:"pieces"`
 	Name        string            `bencode:"name"`
 	Length      int64             `bencode:"length,omitempty"`
 	Files       []TorrentFileInfo `bencode:"files,omitempty"`
@@ -483,7 +483,7 @@ func main() {
 		Announce: CLI.Tracker,
 		Info: TorrentInfo{
 			PieceLength: pieceSize,
-			Pieces:      mh.GetTorrentPieces(),
+			Pieces:      string(mh.GetTorrentPieces()),
 			Name:        baseName,
 		},
 	}
