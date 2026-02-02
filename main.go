@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -141,7 +142,7 @@ type Torrent struct {
 
 type TorrentInfo struct {
 	PieceLength int64             `bencode:"piece length"`
-	Pieces      string            `bencode:"pieces"`
+	Pieces      []byte            `bencode:"pieces"`
 	Name        string            `bencode:"name"`
 	Length      int64             `bencode:"length,omitempty"`
 	Files       []TorrentFileInfo `bencode:"files,omitempty"`
@@ -178,9 +179,9 @@ type MultiHasher struct {
 	pieceSize int64
 
 	// SHA-1 for torrent (crosses file boundaries)
-	torrentPieceBuffer *bytes.Buffer
-	torrentPieceSHA1   hash.Hash
-	torrentPieces      *bytes.Buffer
+	torrentPieceCounter int64
+	torrentPieceSHA1    hash.Hash
+	torrentPieces       *bytes.Buffer
 
 	// SHA-256 for current file
 	fileSHA256 hash.Hash
@@ -197,12 +198,12 @@ type MultiHasher struct {
 
 func NewMultiHasher(pieceSize int64) *MultiHasher {
 	return &MultiHasher{
-		pieceSize:          pieceSize,
-		torrentPieceBuffer: new(bytes.Buffer),
-		torrentPieceSHA1:   sha1.New(),
-		torrentPieces:      new(bytes.Buffer),
-		fileSHA256:         sha256.New(),
-		filePieceSHA256:    sha256.New(),
+		pieceSize:           pieceSize,
+		torrentPieceCounter: 0,
+		torrentPieceSHA1:    sha1.New(),
+		torrentPieces:       new(bytes.Buffer),
+		fileSHA256:          sha256.New(),
+		filePieceSHA256:     sha256.New(),
 	}
 }
 
@@ -248,23 +249,23 @@ func (mh *MultiHasher) Write(data []byte) error {
 	// Process torrent pieces (crosses file boundaries)
 	offset = 0
 	for offset < len(data) {
-		spaceLeftTorrent := mh.pieceSize - int64(mh.torrentPieceBuffer.Len())
+		spaceLeftTorrent := mh.pieceSize - mh.torrentPieceCounter
 		toWriteTorrent := int64(len(data) - offset)
 		if toWriteTorrent > spaceLeftTorrent {
 			toWriteTorrent = spaceLeftTorrent
 		}
 
 		chunk := data[offset : offset+int(toWriteTorrent)]
-		mh.torrentPieceBuffer.Write(chunk)
 		mh.torrentPieceSHA1.Write(chunk)
+		mh.torrentPieceCounter += toWriteTorrent
 		offset += int(toWriteTorrent)
 
 		// Check if torrent piece is complete
-		if mh.torrentPieceBuffer.Len() == int(mh.pieceSize) {
+		if mh.torrentPieceCounter == mh.pieceSize {
 			sum := mh.torrentPieceSHA1.Sum(nil)
 			mh.torrentPieces.Write(sum)
-			mh.torrentPieceBuffer.Reset()
 			mh.torrentPieceSHA1.Reset()
+			mh.torrentPieceCounter = 0
 		}
 	}
 
@@ -295,7 +296,7 @@ func (mh *MultiHasher) EndFile() FileHashResult {
 
 func (mh *MultiHasher) Finalize() {
 	// Finalize last torrent piece if partial
-	if mh.torrentPieceBuffer.Len() > 0 {
+	if mh.torrentPieceCounter > 0 {
 		sum := mh.torrentPieceSHA1.Sum(nil)
 		mh.torrentPieces.Write(sum)
 	}
@@ -322,14 +323,18 @@ func main() {
 	var total int64
 
 	if info.IsDir() {
-		err = filepath.Walk(CLI.Path, func(path string, fi os.FileInfo, err error) error {
+		err = filepath.WalkDir(CLI.Path, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
-			if !fi.Mode().IsRegular() {
+			if !d.Type().IsRegular() {
 				return nil
 			}
 			rel, err := filepath.Rel(CLI.Path, path)
+			if err != nil {
+				return err
+			}
+			fi, err := d.Info()
 			if err != nil {
 				return err
 			}
@@ -447,7 +452,7 @@ func main() {
 
 		var urls []MetalinkURL
 		for i, m := range CLI.Mirrors {
-			u := strings.TrimRight(m, "/") + "/" + relPath
+			u := strings.TrimRight(m, "/") + "/" + escapeURLPath(relPath)
 			if !info.IsDir() && strings.HasSuffix(m, fi.RelPath) {
 				u = m
 			}
@@ -478,7 +483,7 @@ func main() {
 		Announce: CLI.Tracker,
 		Info: TorrentInfo{
 			PieceLength: pieceSize,
-			Pieces:      string(mh.GetTorrentPieces()),
+			Pieces:      mh.GetTorrentPieces(),
 			Name:        baseName,
 		},
 	}
@@ -499,7 +504,7 @@ func main() {
 				if strings.HasSuffix(m, baseName) {
 					tor.URLList[i] = m
 				} else {
-					tor.URLList[i] = strings.TrimRight(m, "/") + "/" + baseName
+					tor.URLList[i] = strings.TrimRight(m, "/") + "/" + url.PathEscape(baseName)
 				}
 			}
 		}
@@ -587,4 +592,12 @@ func pgpDetachedArmorSign(filePath string, keyname string) (string, error) {
 		return "", fmt.Errorf("gpg failed: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func escapeURLPath(p string) string {
+	segments := strings.Split(p, "/")
+	for i, s := range segments {
+		segments[i] = url.PathEscape(s)
+	}
+	return strings.Join(segments, "/")
 }
