@@ -94,15 +94,17 @@ type Metalink struct {
 type MetaURL struct {
 	Priority  int    `xml:"priority,attr,omitempty"`
 	MediaType string `xml:"mediatype,attr,omitempty"`
+	Name      string `xml:"name,attr,omitempty"`
 	Value     string `xml:",chardata"`
 }
 
 type MetalinkFile struct {
-	Name   string        `xml:"name,attr"`
-	Size   int64         `xml:"size"`
-	Hash   MetaHash      `xml:"hash"`
-	Pieces MetaPieces    `xml:"pieces"`
-	URLs   []MetalinkURL `xml:"url,omitempty"`
+	Name     string        `xml:"name,attr"`
+	Size     int64         `xml:"size"`
+	Hash     MetaHash      `xml:"hash"`
+	Pieces   MetaPieces    `xml:"pieces"`
+	URLs     []MetalinkURL `xml:"url,omitempty"`
+	Metaurls []MetaURL     `xml:"metaurl,omitempty"`
 }
 
 type MetaHash struct {
@@ -430,10 +432,6 @@ func main() {
 
 	baseName := filepath.Base(CLI.Path)
 	torrentName := baseName + ".torrent"
-	meta.Metaurls = []MetaURL{
-		{Priority: 1, MediaType: "application/x-bittorrent", Value: torrentName},
-	}
-
 	for _, fi := range files {
 		r := resultMap[fi.RelPath]
 
@@ -457,7 +455,7 @@ func main() {
 				u = m
 			}
 			urls = append(urls, MetalinkURL{
-				Priority: i + 1,
+				Priority: 10 + i,
 				Value:    u,
 			})
 		}
@@ -475,6 +473,14 @@ func main() {
 				Hashes: metaPieceHashes,
 			},
 			URLs: urls,
+			Metaurls: []MetaURL{
+				{
+					Priority:  1,
+					MediaType: "torrent",
+					Name:      relPath, // Maps to the file inside the torrent
+					Value:     url.PathEscape(torrentName),
+				},
+			},
 		}
 		meta.Files = append(meta.Files, mf)
 	}
