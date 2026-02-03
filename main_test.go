@@ -101,11 +101,15 @@ func TestMetalinkValidity(t *testing.T) {
 			{
 				Name: "test.bin",
 				Size: 10,
-				Hash: MetaHash{Type: "sha-256", Value: "fakehash"},
-				Pieces: MetaPieces{
-					Type:   "sha-256",
-					Length: 1024,
-					Hashes: []MetaPieceHash{{Value: "p1"}},
+				Hashes: []MetaHash{
+					{Type: "sha-256", Value: "fakehash"},
+				},
+				Pieces: []MetaPieces{
+					{
+						Type:   "sha-256",
+						Length: 1024,
+						Hashes: []MetaPieceHash{{Value: "p1"}},
+					},
 				},
 			},
 		},
@@ -136,6 +140,113 @@ func TestMetalinkValidity(t *testing.T) {
 	}
 	if len(r.Files) != 1 || r.Files[0].Name != "test.bin" {
 		t.Errorf("Round-trip failed: file data corrupted")
+	}
+}
+
+func TestLoadImportedHashes(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "import-*.meta4")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	content := `<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="oldname.bin">
+    <size>1234</size>
+    <hash type="sha-256">916f0027c57591d1e1388d40733544a631bf2a7d88598c099309605470d0473a</hash>
+    <pieces type="sha-256" length="1024">
+      <hash>e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855</hash>
+    </pieces>
+  </file>
+  <file name="duplicate_size.bin">
+    <size>555</size>
+    <hash type="sha-256">aaaa</hash>
+  </file>
+  <file name="another_duplicate.bin">
+    <size>555</size>
+    <hash type="sha-256">bbbb</hash>
+  </file>
+</metalink>`
+	if _, err := tmpFile.Write([]byte(content)); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+	tmpFile.Close()
+
+	hashes, _, err := loadReusableMetadata(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("loadReusableMetadata failed: %v", err)
+	}
+
+	if len(hashes) != 1 {
+		t.Errorf("Expected 1 unique hash (excluding duplicates), got %d", len(hashes))
+	}
+
+	res, ok := hashes[1234]
+	if !ok {
+		t.Errorf("Expected size 1234 to be present")
+	}
+	if res.FileSHA256 != "916f0027c57591d1e1388d40733544a631bf2a7d88598c099309605470d0473a" {
+		t.Errorf("Wrong hash imported")
+	}
+	if len(res.PieceHashes) != 1 || res.PieceHashes[0] != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+		t.Errorf("Piece hashes not imported correctly")
+	}
+
+	// Verify size 555 was ignored due to collision
+	if _, ok := hashes[555]; ok {
+		t.Errorf("Size 555 should have been ignored due to collision")
+	}
+}
+
+func TestLoadReusableMetadataTorrent(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "torrent-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tor := Torrent{
+		Info: TorrentInfo{
+			Name: "test-dist",
+			Files: []TorrentFileInfo{
+				{
+					Length: 9999,
+					Path:   []string{"oldname.bin"},
+					SHA256: "d04b98f48e8f8bcc15c6ae5ac050801cd6dcfd428fb5f9e65c4e2c3687355da",
+				},
+			},
+			Pieces: "dummy-pieces-dummy-pieces",
+		},
+	}
+
+	torPath := filepath.Join(tmpDir, "test.torrent")
+	f, err := os.Create(torPath)
+	if err != nil {
+		t.Fatalf("failed to create torrent file: %v", err)
+	}
+	if err := bencode.Marshal(f, tor); err != nil {
+		f.Close()
+		t.Fatalf("failed to marshal torrent: %v", err)
+	}
+	f.Close()
+
+	// Load using the base name (no extension)
+	hashes, loadedTor, err := loadReusableMetadata(filepath.Join(tmpDir, "test"))
+	if err != nil {
+		t.Fatalf("loadReusableMetadata failed: %v", err)
+	}
+
+	if loadedTor == nil {
+		t.Fatal("Expected torrent to be loaded")
+	}
+
+	res, ok := hashes[9999]
+	if !ok {
+		t.Errorf("Expected size 9999 to be imported from torrent")
+	}
+	if res.FileSHA256 != "d04b98f48e8f8bcc15c6ae5ac050801cd6dcfd428fb5f9e65c4e2c3687355da" {
+		t.Errorf("Wrong hash imported from torrent")
 	}
 }
 
@@ -217,10 +328,11 @@ func TestFullWorkflow(t *testing.T) {
 	mf := MetalinkFile{
 		Name: "testfile.dat",
 		Size: r.Size,
-		Hash: MetaHash{Type: "sha-256", Value: r.FileSHA256},
-		Pieces: MetaPieces{
-			Type:   "sha-256",
-			Length: pieceSize,
+		Hashes: []MetaHash{
+			{Type: "sha-256", Value: r.FileSHA256},
+		},
+		Pieces: []MetaPieces{
+			{Type: "sha-256", Length: pieceSize},
 		},
 	}
 	meta.Files = append(meta.Files, mf)

@@ -101,8 +101,8 @@ type MetaURL struct {
 type MetalinkFile struct {
 	Name     string        `xml:"name,attr"`
 	Size     int64         `xml:"size"`
-	Hash     MetaHash      `xml:"hash"`
-	Pieces   MetaPieces    `xml:"pieces"`
+	Hashes   []MetaHash    `xml:"hash"`
+	Pieces   []MetaPieces  `xml:"pieces"`
 	URLs     []MetalinkURL `xml:"url,omitempty"`
 	Metaurls []MetaURL     `xml:"metaurl,omitempty"`
 }
@@ -153,12 +153,14 @@ type TorrentInfo struct {
 type TorrentFileInfo struct {
 	Length int64    `bencode:"length"`
 	Path   []string `bencode:"path"`
+	SHA256 string   `bencode:"sha256,omitempty"` // Some torrents include this
 }
 
 var CLI struct {
 	Sign    string   `help:"If set, pass this GPG --local-user (key id) to sign" optional:"" aliases:"pgp,gpg"`
 	Tracker string   `help:"Tracker URL for generated torrent's announce (default privtracker)" default:"https://privtracker.com/metalink/announce"`
 	OutDir  string   `help:"Optional output directory for generated files. Default: input file's parent directory or input directory" short:"o" optional:""`
+	Modify  string   `help:"Reuse hashes from an existing metalink/torrent (matches by file size)" type:"path" optional:""`
 	Mirrors []string `name:"mirrors" short:"m" help:"HTTPS mirrors (if directory: base URLs)"`
 
 	Path string `arg:"" name:"path" help:"File or directory to package" type:"path"`
@@ -207,6 +209,15 @@ func NewMultiHasher(pieceSize int64) *MultiHasher {
 		fileSHA256:          sha256.New(),
 		filePieceSHA256:     sha256.New(),
 	}
+}
+
+func (mh *MultiHasher) SkipFile(relPath string, size int64, sha256 string, pieceHashes []string) {
+	mh.results = append(mh.results, FileHashResult{
+		RelPath:     relPath,
+		Size:        size,
+		FileSHA256:  sha256,
+		PieceHashes: pieceHashes,
+	})
 }
 
 func (mh *MultiHasher) StartFile(relPath string) {
@@ -312,6 +323,97 @@ func (mh *MultiHasher) GetResults() []FileHashResult {
 	return mh.results
 }
 
+func (mh *MultiHasher) SetTorrentPieces(pieces []byte) {
+	mh.torrentPieces.Reset()
+	mh.torrentPieces.Write(pieces)
+}
+
+func loadReusableMetadata(path string) (map[int64]FileHashResult, *Torrent, error) {
+	base := strings.TrimSuffix(path, ".meta4")
+	base = strings.TrimSuffix(base, ".torrent")
+
+	res := make(map[int64]FileHashResult)
+	collisions := make(map[int64]bool)
+
+	// Helper to add results with collision detection
+	addResult := func(size int64, r FileHashResult) {
+		if collisions[size] {
+			return
+		}
+		if existing, ok := res[size]; ok && (existing.FileSHA256 != r.FileSHA256) {
+			delete(res, size)
+			collisions[size] = true
+			return
+		}
+		res[size] = r
+	}
+
+	// 1. Try loading Metalink
+	metaPath := base + ".meta4"
+	if metaData, err := os.ReadFile(metaPath); err == nil {
+		var meta Metalink
+		if err := xml.Unmarshal(metaData, &meta); err == nil {
+			for _, f := range meta.Files {
+				var sha256Val string
+				for _, h := range f.Hashes {
+					if strings.ToLower(h.Type) == "sha-256" {
+						sha256Val = h.Value
+						break
+					}
+				}
+				var pieceHashes []string
+				for _, p := range f.Pieces {
+					if strings.ToLower(p.Type) == "sha-256" {
+						for _, ph := range p.Hashes {
+							pieceHashes = append(pieceHashes, ph.Value)
+						}
+						break
+					}
+				}
+				if sha256Val != "" {
+					addResult(f.Size, FileHashResult{
+						RelPath:     f.Name,
+						Size:        f.Size,
+						FileSHA256:  sha256Val,
+						PieceHashes: pieceHashes,
+					})
+				}
+			}
+		}
+	}
+
+	// 2. Try loading Torrent
+	var tor *Torrent
+	torPath := base + ".torrent"
+	if torData, err := os.ReadFile(torPath); err == nil {
+		var t Torrent
+		if err := bencode.Unmarshal(bytes.NewReader(torData), &t); err == nil {
+			tor = &t
+			// Also check for sha256 in torrent files list
+			if len(t.Info.Files) > 0 {
+				for _, f := range t.Info.Files {
+					if f.SHA256 != "" {
+						addResult(f.Length, FileHashResult{
+							RelPath:    strings.Join(f.Path, "/"),
+							Size:       f.Length,
+							FileSHA256: f.SHA256,
+						})
+					}
+				}
+			} else if t.Info.Length > 0 {
+				// Single file torrent doesn't usually have sha256 in standard, but some tools add it
+				// (not handled here as we don't have a specific field for it in single-file Info yet)
+			}
+		}
+	}
+
+	if len(res) == 0 && tor == nil {
+		return nil, nil, fmt.Errorf("no reusable metadata found at %s(.meta4/.torrent)", base)
+	}
+
+	return res, tor, nil
+}
+
 func main() {
 	ctx := kong.Parse(&CLI)
 	_ = ctx
@@ -359,6 +461,35 @@ func main() {
 	pieceSize := calculatePieceSize(total)
 	fmt.Printf("Total size: %s, piece size: %s, %d files\n", formatBytes(total), formatBytes(pieceSize), len(files))
 
+	var importedHashes map[int64]FileHashResult
+	var reusableTorrent *Torrent
+	if CLI.Modify != "" {
+		var err error
+		importedHashes, reusableTorrent, err = loadReusableMetadata(CLI.Modify)
+		if err != nil {
+			log.Printf("Warning: %v", err)
+		} else {
+			fmt.Printf("Loaded reusable metadata from %s\n", CLI.Modify)
+		}
+	}
+
+	canReuseTorrent := false
+	if reusableTorrent != nil && reusableTorrent.Info.PieceLength == pieceSize {
+		// Check if file sequence matches for torrent piece reuse
+		if len(files) == 1 && reusableTorrent.Info.Length == files[0].Size {
+			canReuseTorrent = true
+		} else if len(files) == len(reusableTorrent.Info.Files) {
+			match := true
+			for i, fi := range files {
+				if fi.Size != reusableTorrent.Info.Files[i].Length {
+					match = false
+					break
+				}
+			}
+			canReuseTorrent = match
+		}
+	}
+
 	// Single-pass hashing: both torrent (SHA-1) and per-file (SHA-256)
 	mh := NewMultiHasher(pieceSize)
 
@@ -375,6 +506,17 @@ func main() {
 		}
 
 		mh.StartFile(fi.RelPath)
+
+		if imported, ok := importedHashes[fi.Size]; ok {
+			status := "hashes"
+			if canReuseTorrent {
+				status = "all hashes"
+			}
+			fmt.Printf("  %.1f%%   (reusing %s for %s)\n", float64(totalBytesProcessed)/float64(total)*100, status, fi.RelPath)
+			mh.SkipFile(fi.RelPath, fi.Size, imported.FileSHA256, imported.PieceHashes)
+			totalBytesProcessed += fi.Size
+			continue
+		}
 
 		f, err := os.Open(full)
 		if err != nil {
@@ -411,7 +553,12 @@ func main() {
 		fmt.Printf("  %.1f%% %.1f MiB/s   %s\n", progress, rate, fi.RelPath)
 	}
 
-	mh.Finalize()
+	if canReuseTorrent {
+		fmt.Println("Reusing torrent pieces from existing file")
+		mh.SetTorrentPieces([]byte(reusableTorrent.Info.Pieces))
+	} else {
+		mh.Finalize()
+	}
 
 	// Final statistics
 	elapsed := time.Since(startTime).Seconds()
@@ -463,14 +610,18 @@ func main() {
 		mf := MetalinkFile{
 			Name: relPath,
 			Size: r.Size,
-			Hash: MetaHash{
-				Type:  "sha-256",
-				Value: r.FileSHA256,
+			Hashes: []MetaHash{
+				{
+					Type:  "sha-256",
+					Value: r.FileSHA256,
+				},
 			},
-			Pieces: MetaPieces{
-				Type:   "sha-256",
-				Length: pieceSize,
-				Hashes: metaPieceHashes,
+			Pieces: []MetaPieces{
+				{
+					Type:   "sha-256",
+					Length: pieceSize,
+					Hashes: metaPieceHashes,
+				},
 			},
 			URLs: urls,
 			Metaurls: []MetaURL{
