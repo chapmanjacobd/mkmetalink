@@ -101,8 +101,8 @@ type MetaURL struct {
 type MetalinkFile struct {
 	Name     string        `xml:"name,attr"`
 	Size     int64         `xml:"size"`
-	Hashes   []MetaHash    `xml:"hash"`
-	Pieces   []MetaPieces  `xml:"pieces"`
+	Hash     MetaHash      `xml:"hash"`
+	Pieces   MetaPieces    `xml:"pieces"`
 	URLs     []MetalinkURL `xml:"url,omitempty"`
 	Metaurls []MetaURL     `xml:"metaurl,omitempty"`
 }
@@ -113,8 +113,8 @@ type MetaHash struct {
 }
 
 type MetaPieces struct {
-	Type   string          `xml:"type,attr"`
 	Length int64           `xml:"length,attr"`
+	Type   string          `xml:"type,attr"`
 	Hashes []MetaPieceHash `xml:"hash"`
 }
 
@@ -172,11 +172,12 @@ type FileInfo struct {
 }
 
 type FileHashResult struct {
-	RelPath     string
-	Size        int64
-	FileSHA256  string   // hex encoded
-	PieceHashes []string // hex encoded SHA-256 piece hashes (per-file boundaries)
-	Err         error
+	RelPath       string
+	Size          int64
+	FileSHA256    string   // hex encoded
+	PieceHashType string   // e.g. "sha-256"
+	PieceHashes   []string // hex encoded piece hashes
+	Err           error
 }
 
 type MultiHasher struct {
@@ -211,12 +212,13 @@ func NewMultiHasher(pieceSize int64) *MultiHasher {
 	}
 }
 
-func (mh *MultiHasher) SkipFile(relPath string, size int64, sha256 string, pieceHashes []string) {
+func (mh *MultiHasher) SkipFile(relPath string, size int64, sha256 string, pieceHashType string, pieceHashes []string) {
 	mh.results = append(mh.results, FileHashResult{
-		RelPath:     relPath,
-		Size:        size,
-		FileSHA256:  sha256,
-		PieceHashes: pieceHashes,
+		RelPath:       relPath,
+		Size:          size,
+		FileSHA256:    sha256,
+		PieceHashType: pieceHashType,
+		PieceHashes:   pieceHashes,
 	})
 }
 
@@ -296,11 +298,12 @@ func (mh *MultiHasher) EndFile() FileHashResult {
 	}
 
 	result := FileHashResult{
-		RelPath:     mh.currentFileRelPath,
-		Size:        mh.currentFileByteCount,
-		FileSHA256:  fileSHA256Hex,
-		PieceHashes: mh.currentFilePieceList,
-		Err:         nil,
+		RelPath:       mh.currentFileRelPath,
+		Size:          mh.currentFileByteCount,
+		FileSHA256:    fileSHA256Hex,
+		PieceHashType: "sha-256",
+		PieceHashes:   mh.currentFilePieceList,
+		Err:           nil,
 	}
 
 	mh.results = append(mh.results, result)
@@ -355,27 +358,24 @@ func loadReusableMetadata(path string) (map[int64]FileHashResult, *Torrent, erro
 		if err := xml.Unmarshal(metaData, &meta); err == nil {
 			for _, f := range meta.Files {
 				var sha256Val string
-				for _, h := range f.Hashes {
-					if strings.ToLower(h.Type) == "sha-256" {
-						sha256Val = h.Value
-						break
-					}
+				if strings.ToLower(f.Hash.Type) == "sha-256" {
+					sha256Val = f.Hash.Value
 				}
+				var pieceHashType string
 				var pieceHashes []string
-				for _, p := range f.Pieces {
-					if strings.ToLower(p.Type) == "sha-256" {
-						for _, ph := range p.Hashes {
-							pieceHashes = append(pieceHashes, ph.Value)
-						}
-						break
+				if f.Pieces.Type != "" {
+					pieceHashType = strings.ToLower(f.Pieces.Type)
+					for _, ph := range f.Pieces.Hashes {
+						pieceHashes = append(pieceHashes, ph.Value)
 					}
 				}
 				if sha256Val != "" {
 					addResult(f.Size, FileHashResult{
-						RelPath:     f.Name,
-						Size:        f.Size,
-						FileSHA256:  sha256Val,
-						PieceHashes: pieceHashes,
+						RelPath:       f.Name,
+						Size:          f.Size,
+						FileSHA256:    sha256Val,
+						PieceHashType: pieceHashType,
+						PieceHashes:   pieceHashes,
 					})
 				}
 			}
@@ -513,7 +513,7 @@ func main() {
 				status = "all hashes"
 			}
 			fmt.Printf("  %.1f%%   (reusing %s for %s)\n", float64(totalBytesProcessed)/float64(total)*100, status, fi.RelPath)
-			mh.SkipFile(fi.RelPath, fi.Size, imported.FileSHA256, imported.PieceHashes)
+			mh.SkipFile(fi.RelPath, fi.Size, imported.FileSHA256, imported.PieceHashType, imported.PieceHashes)
 			totalBytesProcessed += fi.Size
 			continue
 		}
@@ -610,18 +610,14 @@ func main() {
 		mf := MetalinkFile{
 			Name: relPath,
 			Size: r.Size,
-			Hashes: []MetaHash{
-				{
-					Type:  "sha-256",
-					Value: r.FileSHA256,
-				},
+			Hash: MetaHash{
+				Type:  "sha-256",
+				Value: r.FileSHA256,
 			},
-			Pieces: []MetaPieces{
-				{
-					Type:   "sha-256",
-					Length: pieceSize,
-					Hashes: metaPieceHashes,
-				},
+			Pieces: MetaPieces{
+				Length: pieceSize,
+				Type:   r.PieceHashType,
+				Hashes: metaPieceHashes,
 			},
 			URLs: urls,
 			Metaurls: []MetaURL{

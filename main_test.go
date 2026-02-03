@@ -101,15 +101,11 @@ func TestMetalinkValidity(t *testing.T) {
 			{
 				Name: "test.bin",
 				Size: 10,
-				Hashes: []MetaHash{
-					{Type: "sha-256", Value: "fakehash"},
-				},
-				Pieces: []MetaPieces{
-					{
-						Type:   "sha-256",
-						Length: 1024,
-						Hashes: []MetaPieceHash{{Value: "p1"}},
-					},
+				Hash: MetaHash{Type: "sha-256", Value: "916f0027c57591d1e1388d40733544a631bf2a7d88598c099309605470d0473a"},
+				Pieces: MetaPieces{
+					Length: 1024,
+					Type:   "sha-256",
+					Hashes: []MetaPieceHash{{Value: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}},
 				},
 			},
 		},
@@ -328,11 +324,13 @@ func TestFullWorkflow(t *testing.T) {
 	mf := MetalinkFile{
 		Name: "testfile.dat",
 		Size: r.Size,
-		Hashes: []MetaHash{
-			{Type: "sha-256", Value: r.FileSHA256},
+		Hash: MetaHash{
+			Type:  "sha-256",
+			Value: r.FileSHA256,
 		},
-		Pieces: []MetaPieces{
-			{Type: "sha-256", Length: pieceSize},
+		Pieces: MetaPieces{
+			Length: pieceSize,
+			Type:   "sha-256",
 		},
 	}
 	meta.Files = append(meta.Files, mf)
