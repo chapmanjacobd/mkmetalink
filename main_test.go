@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/xml"
 	"os"
 	"path/filepath"
@@ -202,17 +203,18 @@ func TestLoadReusableMetadataTorrent(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
+	dummySHA1 := "12345678901234567890" // 20 bytes
 	tor := Torrent{
 		Info: TorrentInfo{
-			Name: "test-dist",
+			Name:        "test-dist",
+			PieceLength: 16384,
 			Files: []TorrentFileInfo{
 				{
 					Length: 9999,
 					Path:   []string{"oldname.bin"},
-					SHA256: "d04b98f48e8f8bcc15c6ae5ac050801cd6dcfd428fb5f9e65c4e2c3687355da",
 				},
 			},
-			Pieces: "dummy-pieces-dummy-pieces",
+			Pieces: dummySHA1,
 		},
 	}
 
@@ -241,8 +243,14 @@ func TestLoadReusableMetadataTorrent(t *testing.T) {
 	if !ok {
 		t.Errorf("Expected size 9999 to be imported from torrent")
 	}
-	if res.FileSHA256 != "d04b98f48e8f8bcc15c6ae5ac050801cd6dcfd428fb5f9e65c4e2c3687355da" {
-		t.Errorf("Wrong hash imported from torrent")
+	if res.PieceHashType != "sha-1" {
+		t.Errorf("Expected piece hash type sha-1, got %s", res.PieceHashType)
+	}
+	if len(res.PieceHashes) != 1 {
+		t.Errorf("Expected 1 piece hash, got %d", len(res.PieceHashes))
+	}
+	if res.PieceHashes[0] != hex.EncodeToString([]byte(dummySHA1)) {
+		t.Errorf("Wrong piece hash imported from torrent")
 	}
 }
 

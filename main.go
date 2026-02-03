@@ -153,7 +153,6 @@ type TorrentInfo struct {
 type TorrentFileInfo struct {
 	Length int64    `bencode:"length"`
 	Path   []string `bencode:"path"`
-	SHA256 string   `bencode:"sha256,omitempty"` // Some torrents include this
 }
 
 var CLI struct {
@@ -389,20 +388,48 @@ func loadReusableMetadata(path string) (map[int64]FileHashResult, *Torrent, erro
 		var t Torrent
 		if err := bencode.Unmarshal(bytes.NewReader(torData), &t); err == nil {
 			tor = &t
-			// Also check for sha256 in torrent files list
-			if len(t.Info.Files) > 0 {
-				for _, f := range t.Info.Files {
-					if f.SHA256 != "" {
-						addResult(f.Length, FileHashResult{
-							RelPath:    strings.Join(f.Path, "/"),
-							Size:       f.Length,
-							FileSHA256: f.SHA256,
-						})
+			pieces := []byte(t.Info.Pieces)
+			if len(pieces)%20 == 0 {
+				numPieces := len(pieces) / 20
+				if len(t.Info.Files) > 0 {
+					var currentOffset int64
+					for _, f := range t.Info.Files {
+						startPiece := currentOffset / t.Info.PieceLength
+						endPiece := (currentOffset + f.Length - 1) / t.Info.PieceLength
+
+						var phs []string
+						for p := startPiece; p <= endPiece && p < int64(numPieces); p++ {
+							phs = append(phs, hex.EncodeToString(pieces[p*20:(p+1)*20]))
+						}
+
+						r := FileHashResult{
+							RelPath:       strings.Join(f.Path, "/"),
+							Size:          f.Length,
+							PieceHashType: "sha-1",
+							PieceHashes:   phs,
+						}
+						if existing, ok := res[f.Length]; ok {
+							r.FileSHA256 = existing.FileSHA256
+						}
+						addResult(f.Length, r)
+						currentOffset += f.Length
 					}
+				} else if t.Info.Length > 0 {
+					var phs []string
+					for p := 0; p < numPieces; p++ {
+						phs = append(phs, hex.EncodeToString(pieces[p*20:(p+1)*20]))
+					}
+					r := FileHashResult{
+						RelPath:       t.Info.Name,
+						Size:          t.Info.Length,
+						PieceHashType: "sha-1",
+						PieceHashes:   phs,
+					}
+					if existing, ok := res[t.Info.Length]; ok {
+						r.FileSHA256 = existing.FileSHA256
+					}
+					addResult(t.Info.Length, r)
 				}
-			} else if t.Info.Length > 0 {
-				// Single file torrent doesn't usually have sha256 in standard, but some tools add it
-				// (not handled here as we don't have a specific field for it in single-file Info yet)
 			}
 		}
 	}
