@@ -45,8 +45,8 @@ func TestMultiHasher(t *testing.T) {
 	if res1.Size != 4 {
 		t.Errorf("res1 size = %d; want 4", res1.Size)
 	}
-	if len(res1.PieceHashes) != 1 {
-		t.Errorf("res1 piece count = %d; want 1", len(res1.PieceHashes))
+	if len(res1.SHA256PieceHashes) != 1 {
+		t.Errorf("res1 piece count = %d; want 1", len(res1.SHA256PieceHashes))
 	}
 
 	// File 2: "efghi" (1 full piece + 1 partial piece)
@@ -58,8 +58,8 @@ func TestMultiHasher(t *testing.T) {
 	if res2.Size != 5 {
 		t.Errorf("res2 size = %d; want 5", res2.Size)
 	}
-	if len(res2.PieceHashes) != 2 {
-		t.Errorf("res2 piece count = %d; want 2", len(res2.PieceHashes))
+	if len(res2.SHA256PieceHashes) != 2 {
+		t.Errorf("res2 piece count = %d; want 2", len(res2.SHA256PieceHashes))
 	}
 
 	mh.Finalize()
@@ -104,9 +104,9 @@ func TestMetalinkValidity(t *testing.T) {
 				Size: 10,
 				Hash: MetaHash{Type: "sha-256", Value: "916f0027c57591d1e1388d40733544a631bf2a7d88598c099309605470d0473a"},
 				Pieces: MetaPieces{
-					Length: 1024,
 					Type:   "sha-256",
-					Hashes: []MetaPieceHash{{Value: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}},
+					Length: 1024,
+					Hashes: []MetaPieceHash{{Type: "sha-256", Value: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}},
 				},
 			},
 		},
@@ -170,7 +170,7 @@ func TestLoadImportedHashes(t *testing.T) {
 	}
 	tmpFile.Close()
 
-	hashes, _, err := loadReusableMetadata(tmpFile.Name())
+	hashes, _, _, _, err := loadReusableMetadata(tmpFile.Name())
 	if err != nil {
 		t.Fatalf("loadReusableMetadata failed: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestLoadImportedHashes(t *testing.T) {
 	if res.FileSHA256 != "916f0027c57591d1e1388d40733544a631bf2a7d88598c099309605470d0473a" {
 		t.Errorf("Wrong hash imported")
 	}
-	if len(res.PieceHashes) != 1 || res.PieceHashes[0] != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+	if len(res.SHA256PieceHashes) != 1 || res.SHA256PieceHashes[0] != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
 		t.Errorf("Piece hashes not imported correctly")
 	}
 
@@ -230,7 +230,7 @@ func TestLoadReusableMetadataTorrent(t *testing.T) {
 	f.Close()
 
 	// Load using the base name (no extension)
-	hashes, loadedTor, err := loadReusableMetadata(filepath.Join(tmpDir, "test"))
+	hashes, loadedTor, _, _, err := loadReusableMetadata(filepath.Join(tmpDir, "test"))
 	if err != nil {
 		t.Fatalf("loadReusableMetadata failed: %v", err)
 	}
@@ -243,15 +243,13 @@ func TestLoadReusableMetadataTorrent(t *testing.T) {
 	if !ok {
 		t.Errorf("Expected size 9999 to be imported from torrent")
 	}
-	if res.PieceHashType != "sha-1" {
-		t.Errorf("Expected piece hash type sha-1, got %s", res.PieceHashType)
+	if len(res.SHA1PieceHashes) != 1 {
+		t.Errorf("Expected 1 piece hash, got %d", len(res.SHA1PieceHashes))
 	}
-	if len(res.PieceHashes) != 1 {
-		t.Errorf("Expected 1 piece hash, got %d", len(res.PieceHashes))
-	}
-	if res.PieceHashes[0] != hex.EncodeToString([]byte(dummySHA1)) {
+	if res.SHA1PieceHashes[0] != hex.EncodeToString([]byte(dummySHA1)) {
 		t.Errorf("Wrong piece hash imported from torrent")
 	}
+	// Note: We don't extract SHA-1 pieces from torrents anymore
 }
 
 func TestTorrentValidity(t *testing.T) {
@@ -337,8 +335,8 @@ func TestFullWorkflow(t *testing.T) {
 			Value: r.FileSHA256,
 		},
 		Pieces: MetaPieces{
-			Length: pieceSize,
 			Type:   "sha-256",
+			Length: pieceSize,
 		},
 	}
 	meta.Files = append(meta.Files, mf)
