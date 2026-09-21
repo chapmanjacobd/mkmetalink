@@ -170,10 +170,11 @@ func TestLoadImportedHashes(t *testing.T) {
 	}
 	tmpFile.Close()
 
-	hashes, metaFiles, _, _, _, err := loadReusableMetadata(tmpFile.Name())
+	imp, err := loadReusableMetadata(tmpFile.Name())
 	if err != nil {
 		t.Fatalf("loadReusableMetadata failed: %v", err)
 	}
+	hashes := imp.HashResults
 
 	if len(hashes) != 1 {
 		t.Errorf("Expected 1 unique hash (excluding duplicates), got %d", len(hashes))
@@ -181,8 +182,22 @@ func TestLoadImportedHashes(t *testing.T) {
 
 	// The file list must retain every entry, including same-size collisions
 	// that were dropped from the size-keyed hash map.
-	if len(metaFiles) != 3 {
-		t.Errorf("Expected 3 files in metadata listing, got %d", len(metaFiles))
+	if len(imp.MetaFiles) != 3 {
+		t.Errorf("Expected 3 files in metadata listing, got %d", len(imp.MetaFiles))
+	}
+
+	// Colliding same-size files must remain resolvable by relative path.
+	if len(imp.MetaByRel) != 3 {
+		t.Fatalf("Expected 3 path-indexed entries, got %d", len(imp.MetaByRel))
+	}
+	for _, key := range []string{"oldname.bin", "duplicate_size.bin", "another_duplicate.bin"} {
+		if _, ok := imp.MetaByRel[key]; !ok {
+			t.Errorf("Expected path-indexed entry %q", key)
+		}
+	}
+	if imp.MetaByRel["duplicate_size.bin"].FileSHA256 != "aaaa" ||
+		imp.MetaByRel["another_duplicate.bin"].FileSHA256 != "bbbb" {
+		t.Errorf("Path-indexed entries lost their distinct hashes: %+v", imp.MetaByRel)
 	}
 
 	res, ok := hashes[1234]
@@ -236,10 +251,12 @@ func TestLoadReusableMetadataTorrent(t *testing.T) {
 	f.Close()
 
 	// Load using the base name (no extension)
-	hashes, _, loadedTor, _, _, err := loadReusableMetadata(filepath.Join(tmpDir, "test"))
+	imp, err := loadReusableMetadata(filepath.Join(tmpDir, "test"))
 	if err != nil {
 		t.Fatalf("loadReusableMetadata failed: %v", err)
 	}
+	loadedTor := imp.Torrent
+	hashes := imp.HashResults
 
 	if loadedTor == nil {
 		t.Fatal("Expected torrent to be loaded")
@@ -335,6 +352,93 @@ func TestFilesFromReusableMetadata(t *testing.T) {
 	}
 	if !isDir || len(files) != 2 || files[0].RelPath != filepath.Join("sub", "one.txt") || files[1].RelPath != "two.txt" {
 		t.Fatalf("unexpected prefix handling: %+v", files)
+	}
+}
+
+func TestFilesFromReusableMetadataSingleFileDir(t *testing.T) {
+	// A metalink for a directory that contains exactly one file records the
+	// nested path below the package root; it must not be flattened.
+	metaFiles := []FileInfo{
+		{RelPath: "pkg/sub/only.txt", Size: 10},
+	}
+	files, isDir, err := filesFromReusableMetadata("/tmp/new-folder", map[int64]FileHashResult{
+		10: {RelPath: "pkg/sub/only.txt", Size: 10},
+	}, metaFiles, nil)
+	if err != nil {
+		t.Fatalf("filesFromReusableMetadata failed: %v", err)
+	}
+	if !isDir {
+		t.Fatal("single-file directory was identified as a single file")
+	}
+	if len(files) != 1 || files[0].RelPath != filepath.Join("sub", "only.txt") {
+		t.Fatalf("unexpected single-file directory metadata: %+v", files)
+	}
+}
+
+func TestLoadReusableMetadataAllCollisions(t *testing.T) {
+	// Every file sharing a size must still resolve by relative path instead of
+	// failing to load, even though the size-keyed hash map ends up empty.
+	tmpFile, err := os.CreateTemp("", "import-*.meta4")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	content := `<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="pkg/a.bin">
+    <size>555</size>
+    <hash type="sha-256">aaaa</hash>
+  </file>
+  <file name="pkg/b.bin">
+    <size>555</size>
+    <hash type="sha-256">bbbb</hash>
+  </file>
+</metalink>`
+	if _, err := tmpFile.Write([]byte(content)); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+	tmpFile.Close()
+
+	imp, err := loadReusableMetadata(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("loadReusableMetadata failed: %v", err)
+	}
+	if len(imp.HashResults) != 0 {
+		t.Errorf("expected empty size-keyed map, got %d", len(imp.HashResults))
+	}
+	if len(imp.MetaByRel) != 2 || imp.MetaByRel[filepath.FromSlash("a.bin")].FileSHA256 != "aaaa" || imp.MetaByRel[filepath.FromSlash("b.bin")].FileSHA256 != "bbbb" {
+		t.Errorf("colliding files not resolvable by path: %+v", imp.MetaByRel)
+	}
+}
+
+func TestLoadReusableMetadataPieceLength(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "import-*.meta4")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	content := `<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="a.bin">
+    <size>1024</size>
+    <pieces type="sha-256" length="1024">
+      <hash>e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855</hash>
+    </pieces>
+  </file>
+</metalink>`
+	if _, err := tmpFile.Write([]byte(content)); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+	tmpFile.Close()
+
+	imp, err := loadReusableMetadata(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("loadReusableMetadata failed: %v", err)
+	}
+	if imp.MetaPieceLength != 1024 {
+		t.Errorf("expected metalink piece length 1024, got %d", imp.MetaPieceLength)
 	}
 }
 
