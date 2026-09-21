@@ -716,13 +716,16 @@ func main() {
 	}
 
 	pieceSize := calculatePieceSize(total)
-	adoptedPieceSize := false
 
 	if CLI.Modify != "" {
-		// Reuse the piece size from the imported metadata so the output stays
-		// consistent with the reused piece hashes, even if files get dropped.
+		// With --modify the piece size is always taken from the imported
+		// metadata so any reused piece hashes stay consistent with the emitted
+		// <pieces length>/piece length. It is never recomputed afterwards:
+		// files are only dropped under --modify, and recomputing would orphan
+		// the reused piece hashes.
 		if importedTorrent != nil {
-			// Adopt piece size from imported torrent to facilitate reuse/consistency
+			// Prefer the torrent's piece length: it determines which SHA-1
+			// pieces can be reused for the torrent output.
 			if pieceSize != importedTorrent.Info.PieceLength {
 				fmt.Printf("Note: Adoption of imported torrent piece size %s (was %s)\n", formatBytes(importedTorrent.Info.PieceLength), formatBytes(pieceSize))
 				pieceSize = importedTorrent.Info.PieceLength
@@ -731,15 +734,12 @@ func main() {
 			fmt.Printf("Note: Adoption of imported metalink piece size %s (was %s)\n", formatBytes(importedPieceLength), formatBytes(pieceSize))
 			pieceSize = importedPieceLength
 		}
-		// Once --modify is given the piece size is fixed: recomputing it after
-		// dropping files would orphan the imported piece hashes.
-		adoptedPieceSize = true
 	}
 
 	fmt.Printf("Total size: %s, piece size: %s, %d files\n", formatBytes(total), formatBytes(pieceSize), len(files))
 
-	canReuseTorrent := false
-	if importedTorrent != nil && importedTorrent.Info.PieceLength == pieceSize {
+	canReuseTorrent := CLI.IgnoreSize && importedTorrent != nil
+	if !canReuseTorrent && importedTorrent != nil && importedTorrent.Info.PieceLength == pieceSize {
 		// Check if file sequence matches for torrent piece reuse
 		if len(files) == 1 && importedTorrent.Info.Length == files[0].Size {
 			canReuseTorrent = true
@@ -773,17 +773,40 @@ func main() {
 
 		mh.StartFile(fi.RelPath)
 
-		reused, ok := importedHashes[fi.Size]
-		if !ok && importedByRel != nil {
-			// Same-size files can't be told apart by size alone; fall back to
-			// an exact relative-path match when the layout is preserved.
-			reused, ok = importedByRel[fi.RelPath]
-			if ok && pathExists && reused.Size != fi.Size && !CLI.IgnoreSize {
-				log.Printf("Warning: metadata for %s has size %s but the file is %s; rehashing", fi.RelPath, formatBytes(reused.Size), formatBytes(fi.Size))
-				ok = false
+		var reused FileHashResult
+		ok := false
+		if CLI.IgnoreSize {
+			// With --ignore-size sizes are untrustworthy, so resolve records by
+			// relative path first (the layout) and only fall back to the
+			// size-keyed index. This way a file whose size changed is matched
+			// to its own metadata rather than to an unrelated same-size file.
+			if importedByRel != nil {
+				reused, ok = importedByRel[fi.RelPath]
+			}
+			if !ok {
+				reused, ok = importedHashes[fi.Size]
+			}
+		} else {
+			reused, ok = importedHashes[fi.Size]
+			if !ok && importedByRel != nil {
+				// Same-size files can't be told apart by size alone; fall back to
+				// an exact relative-path match when the layout is preserved.
+				reused, ok = importedByRel[fi.RelPath]
+				if ok && pathExists && reused.Size != fi.Size {
+					log.Printf("Warning: metadata for %s has size %s but the file is %s; rehashing", fi.RelPath, formatBytes(reused.Size), formatBytes(fi.Size))
+					ok = false
+				}
 			}
 		}
 		if ok {
+			// SHA-256 piece hashes are only reusable when they were generated
+			// under the adopted piece size; reusing them otherwise would emit a
+			// <pieces length> that does not match the hashes themselves.
+			if !CLI.IgnoreSize && len(reused.SHA256PieceHashes) > 0 && (importedPieceLength == 0 || importedPieceLength != pieceSize) {
+				log.Printf("Warning: SHA-256 piece hashes for %s were generated with a different piece size; rehashing pieces", fi.RelPath)
+				reused.SHA256PieceHashes = nil
+			}
+
 			needSHA256 := (CLI.Modify == "" || metaFound)
 			// An empty file has a valid file-level SHA-256 but no pieces, so
 			// the presence of the file hash alone is enough to reuse it.
@@ -861,14 +884,14 @@ func main() {
 		if len(files) == 0 {
 			log.Fatalf("no files could be reused from %s", CLI.Modify)
 		}
-		// Recompute totals after dropping files so the reported sizes, piece
-		// size, and progress reflect only the files actually emitted.
+		// Recompute totals after dropping files so the reported sizes and
+		// progress reflect only the files actually emitted. The piece size is
+		// intentionally not recomputed: files can only be dropped while
+		// running with --modify, where the piece size is fixed by the imported
+		// metadata to keep any reused piece hashes valid.
 		total = 0
 		for _, fi := range files {
 			total += fi.Size
-		}
-		if !adoptedPieceSize {
-			pieceSize = calculatePieceSize(total)
 		}
 	}
 
@@ -888,6 +911,11 @@ func main() {
 	resultMap := make(map[string]FileHashResult)
 	for _, r := range results {
 		resultMap[r.RelPath] = r
+	}
+
+	var writeTorrent bool
+	if CLI.Modify == "" || torFound {
+		writeTorrent = true
 	}
 
 	// Build MetaLink v4
@@ -934,14 +962,20 @@ func main() {
 				Value: r.FileSHA256,
 			},
 			URLs: urls,
-			Metaurls: []MetaURL{
+		}
+		// Only reference the torrent from the metalink when one is actually
+		// emitted. Under --modify the torrent can be suppressed (metalink-only
+		// import, or files dropped breaking the piece layout); a dangling
+		// metaurl would point clients at a file that never exists.
+		if writeTorrent {
+			mf.Metaurls = []MetaURL{
 				{
 					Priority:  1,
 					MediaType: "torrent",
 					Name:      relPath, // Maps to the file inside the torrent
 					Value:     url.PathEscape(torrentName),
 				},
-			},
+			}
 		}
 		if len(metaPieceHashes) > 0 {
 			mf.Pieces = MetaPieces{
@@ -1018,7 +1052,7 @@ func main() {
 	}
 
 	var generated []string
-	if CLI.Modify == "" || torFound {
+	if writeTorrent {
 		torPath := filepath.Join(outDir, torrentName)
 		if err := writeTorrentFile(torPath, tor); err != nil {
 			log.Fatalf("write torrent: %v", err)
