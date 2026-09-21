@@ -161,7 +161,7 @@ var CLI struct {
 	Sign    string   `help:"If set, pass this GPG --local-user (key id) to sign" optional:"" aliases:"pgp,gpg"`
 	Tracker string   `help:"Tracker URL for generated torrent's announce (default privtracker)" default:"https://privtracker.com/metalink/announce"`
 	OutDir  string   `help:"Optional output directory for generated files. Default: input file's parent directory or input directory" short:"o" optional:""`
-	Modify  string   `help:"Reuse hashes from an existing metalink/torrent (matches by file size)" type:"path" optional:""`
+	Modify  string   `help:"Reuse hashes from an existing metalink/torrent (matches by file size)" type:"path" placeholder:"PATH" optional:""`
 	Mirrors []string `name:"mirrors" short:"m" help:"HTTPS mirrors (if directory: base URLs)"`
 
 	Path string `arg:"" name:"path" help:"File or directory to package" type:"path"`

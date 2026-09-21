@@ -20,6 +20,36 @@ Generated:
 ./dumps.wikimedia.org/relevance.zip.torrent
 ```
 
+## Rename files without rehashing
+
+Use `--modify` to reuse hashes from an existing Metalink and torrent when a
+file is renamed. The old `.meta4` and `.torrent` files must have the same file
+stem and both must exist. You only need to pass either one of them to
+`--modify`; `mkmetalink` finds the other automatically.
+
+For example, install the version that supports this workflow and rename
+`A` to `B`:
+
+```sh
+$ mv A B
+$ mkmetalink --modify A.meta4 B
+```
+
+You can pass the old torrent instead:
+
+```sh
+$ mkmetalink --modify A.torrent B
+```
+
+Both commands reuse the hashes from `A.meta4` and `A.torrent` and create
+`B.meta4` and `B.torrent` without rehashing `B`.
+
+After verifying the new files, delete the old metadata files:
+
+```sh
+$ rm A.meta4 A.torrent
+```
+
 ## Folders / Relative paths
 
 ```sh
@@ -50,6 +80,7 @@ Flags:
       --sign=STRING                                            If set, pass this GPG --local-user (key id) to sign
       --tracker="https://privtracker.com/metalink/announce"    Tracker URL for generated torrent's announce (default privtracker)
   -o, --out-dir=STRING                                         Optional output directory for generated files. Default: input file's parent directory or input directory
+      --modify=PATH                                            Reuse hashes from an existing metalink/torrent (matches by file size)
   -m, --mirrors=MIRRORS,...                                    HTTPS mirrors (if directory: base URLs)
 ```
 
