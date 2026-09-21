@@ -170,13 +170,19 @@ func TestLoadImportedHashes(t *testing.T) {
 	}
 	tmpFile.Close()
 
-	hashes, _, _, _, err := loadReusableMetadata(tmpFile.Name())
+	hashes, metaFiles, _, _, _, err := loadReusableMetadata(tmpFile.Name())
 	if err != nil {
 		t.Fatalf("loadReusableMetadata failed: %v", err)
 	}
 
 	if len(hashes) != 1 {
 		t.Errorf("Expected 1 unique hash (excluding duplicates), got %d", len(hashes))
+	}
+
+	// The file list must retain every entry, including same-size collisions
+	// that were dropped from the size-keyed hash map.
+	if len(metaFiles) != 3 {
+		t.Errorf("Expected 3 files in metadata listing, got %d", len(metaFiles))
 	}
 
 	res, ok := hashes[1234]
@@ -230,7 +236,7 @@ func TestLoadReusableMetadataTorrent(t *testing.T) {
 	f.Close()
 
 	// Load using the base name (no extension)
-	hashes, loadedTor, _, _, err := loadReusableMetadata(filepath.Join(tmpDir, "test"))
+	hashes, _, loadedTor, _, _, err := loadReusableMetadata(filepath.Join(tmpDir, "test"))
 	if err != nil {
 		t.Fatalf("loadReusableMetadata failed: %v", err)
 	}
@@ -250,6 +256,86 @@ func TestLoadReusableMetadataTorrent(t *testing.T) {
 		t.Errorf("Wrong piece hash imported from torrent")
 	}
 	// Note: We don't extract SHA-1 pieces from torrents anymore
+}
+
+func TestFilesFromReusableMetadata(t *testing.T) {
+	files, isDir, err := filesFromReusableMetadata("/tmp/new-name", nil, nil, &Torrent{
+		Info: TorrentInfo{
+			Length: 123,
+		},
+	})
+	if err != nil {
+		t.Fatalf("filesFromReusableMetadata failed: %v", err)
+	}
+	if isDir {
+		t.Fatal("single-file metadata was identified as a directory")
+	}
+	if len(files) != 1 || files[0].RelPath != "new-name" || files[0].Size != 123 {
+		t.Fatalf("unexpected single-file metadata: %+v", files)
+	}
+
+	files, isDir, err = filesFromReusableMetadata("/tmp/new-folder/", nil, nil, &Torrent{
+		Info: TorrentInfo{
+			Files: []TorrentFileInfo{
+				{Length: 10, Path: []string{"nested", "one"}},
+				{Length: 20, Path: []string{"two"}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("filesFromReusableMetadata failed: %v", err)
+	}
+	if !isDir {
+		t.Fatal("multi-file metadata was not identified as a directory")
+	}
+	if len(files) != 2 || files[0].RelPath != filepath.Join("nested", "one") || files[1].RelPath != "two" {
+		t.Fatalf("unexpected multi-file metadata: %+v", files)
+	}
+
+	files, isDir, err = filesFromReusableMetadata("/tmp/new-folder/", map[int64]FileHashResult{
+		10: {RelPath: "old-folder/nested/one", Size: 10},
+		20: {RelPath: "old-folder/two", Size: 20},
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("filesFromReusableMetadata failed: %v", err)
+	}
+	if !isDir || len(files) != 2 || files[0].RelPath != filepath.Join("nested", "one") || files[1].RelPath != "two" {
+		t.Fatalf("unexpected metalink-only metadata: %+v", files)
+	}
+
+	// Same-size files that collide in the size-keyed hash map must still be
+	// listed when the metalink's own file list is available.
+	metaFiles := []FileInfo{
+		{RelPath: "old-folder/x1.bin", Size: 7},
+		{RelPath: "old-folder/x2.bin", Size: 7},
+		{RelPath: "old-folder/u.bin", Size: 6},
+	}
+	files, isDir, err = filesFromReusableMetadata("/tmp/new-folder/", map[int64]FileHashResult{
+		6: {RelPath: "old-folder/u.bin", Size: 6},
+	}, metaFiles, nil)
+	if err != nil {
+		t.Fatalf("filesFromReusableMetadata failed: %v", err)
+	}
+	if !isDir || len(files) != 3 || files[0].RelPath != "x1.bin" || files[1].RelPath != "x2.bin" || files[2].RelPath != "u.bin" {
+		t.Fatalf("unexpected colliding metalink metadata: %+v", files)
+	}
+
+	// The package prefix is stripped from the metadata paths even when the
+	// metadata file itself has been renamed.
+	renamed := []FileInfo{
+		{RelPath: "renamed-pkg/sub/one.txt", Size: 10},
+		{RelPath: "renamed-pkg/two.txt", Size: 20},
+	}
+	files, isDir, err = filesFromReusableMetadata("/tmp/new-folder/", map[int64]FileHashResult{
+		10: {RelPath: "renamed-pkg/sub/one.txt", Size: 10},
+		20: {RelPath: "renamed-pkg/two.txt", Size: 20},
+	}, renamed, nil)
+	if err != nil {
+		t.Fatalf("filesFromReusableMetadata failed: %v", err)
+	}
+	if !isDir || len(files) != 2 || files[0].RelPath != filepath.Join("sub", "one.txt") || files[1].RelPath != "two.txt" {
+		t.Fatalf("unexpected prefix handling: %+v", files)
+	}
 }
 
 func TestTorrentValidity(t *testing.T) {

@@ -44,6 +44,10 @@ $ mkmetalink --modify A.torrent B
 Both commands reuse the hashes from `A.meta4` and `A.torrent` and create
 `B.meta4` and `B.torrent` without rehashing `B`.
 
+When `B` does not exist yet, `--modify` can still use the reusable metadata
+to generate the renamed files. `mkmetalink` warns that it cannot read `B` and
+uses the file or folder structure and sizes from the metadata instead.
+
 After verifying the new files, delete the old metadata files:
 
 ```sh

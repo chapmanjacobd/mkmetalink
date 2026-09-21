@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -164,7 +165,7 @@ var CLI struct {
 	Modify  string   `help:"Reuse hashes from an existing metalink/torrent (matches by file size)" type:"path" placeholder:"PATH" optional:""`
 	Mirrors []string `name:"mirrors" short:"m" help:"HTTPS mirrors (if directory: base URLs)"`
 
-	Path string `arg:"" name:"path" help:"File or directory to package" type:"path"`
+	Path string `arg:"" name:"path" help:"File or directory to package"`
 }
 
 type FileInfo struct {
@@ -343,7 +344,7 @@ func (mh *MultiHasher) SetTorrentPieces(pieces []byte) {
 	mh.torrentPieces.Write(pieces)
 }
 
-func loadReusableMetadata(path string) (map[int64]FileHashResult, *Torrent, bool, bool, error) {
+func loadReusableMetadata(path string) (map[int64]FileHashResult, []FileInfo, *Torrent, bool, bool, error) {
 	base := strings.TrimSuffix(path, ".meta4")
 	base = strings.TrimSuffix(base, ".torrent")
 
@@ -391,12 +392,14 @@ func loadReusableMetadata(path string) (map[int64]FileHashResult, *Torrent, bool
 	}
 
 	metaFound := false
+	var metaFiles []FileInfo
 	metaPath := base + ".meta4"
 	if metaData, err := os.ReadFile(metaPath); err == nil {
 		metaFound = true
 		var meta Metalink
 		if err := xml.Unmarshal(metaData, &meta); err == nil {
 			for _, f := range meta.Files {
+				metaFiles = append(metaFiles, FileInfo{RelPath: f.Name, Size: f.Size})
 				var fileSHA256 string
 				if strings.ToLower(f.Hash.Type) == "sha-256" {
 					fileSHA256 = f.Hash.Value
@@ -467,10 +470,85 @@ func loadReusableMetadata(path string) (map[int64]FileHashResult, *Torrent, bool
 	}
 
 	if len(res) == 0 && tor == nil {
-		return nil, nil, false, false, fmt.Errorf("no reusable metadata found at %s(.meta4/.torrent)", base)
+		return nil, nil, nil, false, false, fmt.Errorf("no reusable metadata found at %s(.meta4/.torrent)", base)
 	}
 
-	return res, tor, metaFound, torFound, nil
+	return res, metaFiles, tor, metaFound, torFound, nil
+}
+
+func filesFromReusableMetadata(path string, hashes map[int64]FileHashResult, metaFiles []FileInfo, tor *Torrent) ([]FileInfo, bool, error) {
+	if tor != nil {
+		if len(tor.Info.Files) > 0 {
+			files := make([]FileInfo, 0, len(tor.Info.Files))
+			for _, file := range tor.Info.Files {
+				files = append(files, FileInfo{
+					RelPath: filepath.Join(file.Path...),
+					Size:    file.Length,
+				})
+			}
+			return files, true, nil
+		}
+		if tor.Info.Length > 0 {
+			return []FileInfo{{
+				RelPath: filepath.Base(path),
+				Size:    tor.Info.Length,
+			}}, false, nil
+		}
+	}
+
+	// Prefer the metalink's own file list when available: the size-keyed hash
+	// map cannot represent multiple distinct files that share a size.
+	var imported []FileInfo
+	if len(metaFiles) > 0 {
+		imported = append(imported, metaFiles...)
+	} else {
+		for _, result := range hashes {
+			imported = append(imported, FileInfo{RelPath: result.RelPath, Size: result.Size})
+		}
+		sort.Slice(imported, func(i, j int) bool {
+			return imported[i].RelPath < imported[j].RelPath
+		})
+	}
+
+	if len(imported) == 0 {
+		return nil, false, fmt.Errorf("cannot infer files from reusable metadata")
+	}
+
+	isDir := len(imported) > 1 || strings.HasSuffix(path, string(os.PathSeparator))
+
+	// This tool emits "<package>/<path>" in the metalink. If every metadata
+	// file shares the same leading directory, strip that package prefix so the
+	// result is independent of the metadata file's own (possibly renamed) name.
+	stripPrefix := ""
+	if isDir {
+		firstParts := strings.Split(filepath.ToSlash(imported[0].RelPath), "/")
+		if len(firstParts) > 1 {
+			stripPrefix = firstParts[0]
+			for _, file := range imported[1:] {
+				parts := strings.Split(filepath.ToSlash(file.RelPath), "/")
+				if len(parts) < 2 || parts[0] != stripPrefix {
+					stripPrefix = ""
+					break
+				}
+			}
+		}
+	}
+
+	files := make([]FileInfo, 0, len(imported))
+	for _, file := range imported {
+		relPath := filepath.FromSlash(file.RelPath)
+		if !isDir {
+			relPath = filepath.Base(path)
+		} else if stripPrefix != "" {
+			parts := strings.Split(filepath.ToSlash(relPath), "/")
+			relPath = filepath.FromSlash(strings.Join(parts[1:], "/"))
+			if relPath == "." || relPath == "" {
+				relPath = filepath.Base(file.RelPath)
+			}
+		}
+		files = append(files, FileInfo{RelPath: relPath, Size: file.Size})
+	}
+	return files, isDir, nil
 }
 
 func main() {
@@ -478,14 +556,51 @@ func main() {
 	_ = ctx
 
 	info, err := os.Stat(CLI.Path)
-	if err != nil {
+	if err != nil && (CLI.Modify == "" || !os.IsNotExist(err)) {
 		log.Fatalf("stat %s: %v", CLI.Path, err)
+	}
+	pathExists := err == nil
+	if !pathExists {
+		log.Printf("Warning: path %s does not exist; using reusable metadata to generate output without reading it", CLI.Path)
+	}
+
+	var importedHashes map[int64]FileHashResult
+	var importedFiles []FileInfo
+	var importedTorrent *Torrent
+	var metaFound, torFound bool
+
+	if CLI.Modify != "" {
+		var err error
+		importedHashes, importedFiles, importedTorrent, metaFound, torFound, err = loadReusableMetadata(CLI.Modify)
+		if err != nil {
+			log.Printf("Warning: failed to load reusable metadata: %v", err)
+		} else {
+			source := ""
+			if metaFound && torFound {
+				source = "Metalink and Torrent"
+			} else if metaFound {
+				source = "Metalink"
+			} else if torFound {
+				source = "Torrent"
+			}
+			fmt.Printf("Imported %d unique hashes from %s (%s)\n", len(importedHashes), CLI.Modify, source)
+		}
 	}
 
 	var files []FileInfo
 	var total int64
+	isDir := false
 
-	if info.IsDir() {
+	if !pathExists {
+		files, isDir, err = filesFromReusableMetadata(CLI.Path, importedHashes, importedFiles, importedTorrent)
+		if err != nil {
+			log.Fatalf("cannot use missing path %s: %v", CLI.Path, err)
+		}
+		for _, file := range files {
+			total += file.Size
+		}
+	} else if info.IsDir() {
+		isDir = true
 		err = filepath.WalkDir(CLI.Path, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -519,32 +634,12 @@ func main() {
 
 	pieceSize := calculatePieceSize(total)
 
-	var importedHashes map[int64]FileHashResult
-	var importedTorrent *Torrent
-	var metaFound, torFound bool
-
 	if CLI.Modify != "" {
-		var err error
-		importedHashes, importedTorrent, metaFound, torFound, err = loadReusableMetadata(CLI.Modify)
-		if err != nil {
-			log.Printf("Warning: failed to load reusable metadata: %v", err)
-		} else {
-			source := ""
-			if metaFound && torFound {
-				source = "Metalink and Torrent"
-			} else if metaFound {
-				source = "Metalink"
-			} else if torFound {
-				source = "Torrent"
-			}
-			fmt.Printf("Imported %d unique hashes from %s (%s)\n", len(importedHashes), CLI.Modify, source)
-
-			if importedTorrent != nil {
-				// Adopt piece size from imported torrent to facilitate reuse/consistency
-				if pieceSize != importedTorrent.Info.PieceLength {
-					fmt.Printf("Note: Adoption of imported torrent piece size %s (was %s)\n", formatBytes(importedTorrent.Info.PieceLength), formatBytes(pieceSize))
-					pieceSize = importedTorrent.Info.PieceLength
-				}
+		if importedTorrent != nil {
+			// Adopt piece size from imported torrent to facilitate reuse/consistency
+			if pieceSize != importedTorrent.Info.PieceLength {
+				fmt.Printf("Note: Adoption of imported torrent piece size %s (was %s)\n", formatBytes(importedTorrent.Info.PieceLength), formatBytes(pieceSize))
+				pieceSize = importedTorrent.Info.PieceLength
 			}
 		}
 	}
@@ -577,9 +672,10 @@ func main() {
 	// Reuse buffer across all files
 	buf := make([]byte, CHUNK_SIZE)
 
+	skipped := make(map[string]bool)
 	for _, fi := range files {
 		full := CLI.Path
-		if info.IsDir() {
+		if isDir {
 			full = filepath.Join(CLI.Path, fi.RelPath)
 		}
 
@@ -602,6 +698,12 @@ func main() {
 				totalBytesProcessed += fi.Size
 				continue
 			}
+		}
+
+		if !pathExists {
+			log.Printf("Warning: cannot reuse metadata for %s (size %s); skipping file", fi.RelPath, formatBytes(fi.Size))
+			skipped[fi.RelPath] = true
+			continue
 		}
 
 		f, err := os.Open(full)
@@ -637,6 +739,23 @@ func main() {
 		rate := float64(totalBytesProcessed) / elapsed / (1024 * 1024)
 		progress := float64(totalBytesProcessed) / float64(total) * 100
 		fmt.Printf("  %.1f%% %.1f MiB/s   %s\n", progress, rate, fi.RelPath)
+	}
+
+	if len(skipped) > 0 {
+		kept := files[:0]
+		for _, fi := range files {
+			if !skipped[fi.RelPath] {
+				kept = append(kept, fi)
+			}
+		}
+		files = kept
+		if torFound {
+			log.Printf("Warning: omitting torrent output because %d file(s) could not be reused; the remaining pieces would not match the file layout", len(skipped))
+			torFound = false
+		}
+		if len(files) == 0 {
+			log.Fatalf("no files could be reused from %s", CLI.Modify)
+		}
 	}
 
 	if canReuseTorrent {
@@ -677,14 +796,14 @@ func main() {
 		}
 
 		relPath := filepath.ToSlash(fi.RelPath)
-		if info.IsDir() {
+		if isDir {
 			relPath = baseName + "/" + filepath.ToSlash(fi.RelPath)
 		}
 
 		var urls []MetalinkURL
 		for i, m := range CLI.Mirrors {
 			u := strings.TrimRight(m, "/") + "/" + escapeURLPath(relPath)
-			if !info.IsDir() && strings.HasSuffix(m, fi.RelPath) {
+			if !isDir && strings.HasSuffix(m, fi.RelPath) {
 				u = m
 			}
 			urls = append(urls, MetalinkURL{
@@ -740,7 +859,7 @@ func main() {
 
 	// Add web seeds (mirrors) to torrent
 	if len(CLI.Mirrors) > 0 {
-		if info.IsDir() {
+		if isDir {
 			// For multi-file torrents, mirrors should be base URLs
 			// the "url-list" must be a root folder where a client could add the "name" and "path/file"
 			tor.URLList = make([]string, len(CLI.Mirrors))
@@ -760,7 +879,7 @@ func main() {
 		}
 	}
 
-	if info.IsDir() {
+	if isDir {
 		var tFiles []TorrentFileInfo
 		for _, fi := range files {
 			tFiles = append(tFiles, TorrentFileInfo{
