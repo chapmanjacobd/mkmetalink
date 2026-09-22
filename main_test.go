@@ -35,7 +35,7 @@ func TestCalculatePieceSize(t *testing.T) {
 
 func TestMultiHasher(t *testing.T) {
 	pieceSize := int64(4) // very small for testing
-	mh := NewMultiHasher(pieceSize)
+	mh := NewMultiHasher(pieceSize, pieceSize)
 
 	// File 1: "abcd" (exactly 1 piece)
 	mh.StartFile("file1.txt")
@@ -495,7 +495,7 @@ func TestFullWorkflow(t *testing.T) {
 	totalSize := int64(len(data))
 	pieceSize := int64(1024 * 1024)
 
-	mh := NewMultiHasher(pieceSize)
+	mh := NewMultiHasher(pieceSize, pieceSize)
 	mh.StartFile("testfile.dat")
 	mh.Write(data)
 	mh.EndFile()
@@ -549,6 +549,184 @@ func TestFullWorkflow(t *testing.T) {
 
 	var torBuf bytes.Buffer
 	if err := bencode.Marshal(&torBuf, tor); err != nil {
-		t.Errorf("Final Torrent marshal failed: %v", err)
+		t.Fatalf("Final Torrent marshal failed: %v", err)
+	}
+}
+
+func TestMultiHasherDistinctPieceSizes(t *testing.T) {
+	// The metalink (SHA-256, resets per file) and torrent (SHA-1, crosses file
+	// boundaries) streams must be able to use different piece sizes, matching
+	// imported metadata that disagree on their piece length.
+	mh := NewMultiHasher(4, 5)
+	mh.StartFile("f.bin")
+	mh.Write([]byte("abcdefghij"))
+	mh.EndFile()
+	mh.Finalize()
+
+	res := mh.GetResults()[0]
+	if len(res.SHA256PieceHashes) != 3 {
+		t.Errorf("metalink (SHA-256) pieces = %d; want 3 (size 4)", len(res.SHA256PieceHashes))
+	}
+	if want := 2 * 20; len(mh.GetTorrentPieces()) != want {
+		t.Errorf("torrent (SHA-1) pieces byte length = %d; want %d (size 5)", len(mh.GetTorrentPieces()), want)
+	}
+}
+
+func TestCanReuseTorrentPieces(t *testing.T) {
+	tor := &Torrent{Info: TorrentInfo{
+		PieceLength: 1024,
+		Files: []TorrentFileInfo{
+			{Length: 4, Path: []string{"a"}},
+			{Length: 6, Path: []string{"b"}},
+		},
+	}}
+	files := []FileInfo{{RelPath: "a", Size: 4}, {RelPath: "b", Size: 6}}
+
+	if !canReuseTorrentPieces(files, tor, 1024, false) {
+		t.Error("matching multi-file layout should allow torrent piece reuse")
+	}
+	if canReuseTorrentPieces(files, nil, 1024, true) {
+		t.Error("nil torrent should never allow reuse")
+	}
+	if canReuseTorrentPieces(files, tor, 2048, false) {
+		t.Error("torrent piece length must match the emitted piece length")
+	}
+	// A different file order must not count as a match.
+	reorder := []FileInfo{{RelPath: "b", Size: 6}, {RelPath: "a", Size: 4}}
+	if canReuseTorrentPieces(reorder, tor, 1024, false) {
+		t.Error("reordered files must not allow torrent piece reuse")
+	}
+
+	// --ignore-size trusts the override even when the sizes no longer match:
+	// files are never dropped, the whole piece blob is reused regardless.
+	drifted := []FileInfo{{RelPath: "a", Size: 99}, {RelPath: "b", Size: 3}}
+	if !canReuseTorrentPieces(drifted, tor, 1024, true) {
+		t.Error("--ignore-size should allow torrent piece reuse despite size drift")
+	}
+	if canReuseTorrentPieces(drifted, tor, 1024, false) {
+		t.Error("without --ignore-size a size drift must block torrent piece reuse")
+	}
+
+	// Single-file torrent: the recorded length must match.
+	single := &Torrent{Info: TorrentInfo{PieceLength: 1024, Length: 100}}
+	if !canReuseTorrentPieces([]FileInfo{{RelPath: "x", Size: 100}}, single, 1024, false) {
+		t.Error("matching single-file length should allow torrent piece reuse")
+	}
+	if canReuseTorrentPieces([]FileInfo{{RelPath: "x", Size: 200}}, single, 1024, false) {
+		t.Error("differing single-file length should block torrent piece reuse")
+	}
+}
+
+func TestResolveReuse(t *testing.T) {
+	hashes := map[int64]FileHashResult{
+		10: {RelPath: "x.bin", Size: 10, FileSHA256: "aaa", SHA256PieceHashes: []string{"p1", "p2"}},
+	}
+	byRel := map[string]FileHashResult{
+		"x.bin": {RelPath: "x.bin", Size: 10, FileSHA256: "bbb"},
+		"other": {RelPath: "other", Size: 99, FileSHA256: "ccc"},
+	}
+
+	// Size-keyed index is authoritative by default.
+	r, ok := resolveReuse(FileInfo{RelPath: "x.bin", Size: 10}, hashes, byRel, true, false, 1024)
+	if !ok || r.FileSHA256 != "aaa" {
+		t.Errorf("size-keyed lookup failed: %+v ok=%v", r, ok)
+	}
+
+	// Path-indexed fallback resolves same-size collisions absent from the
+	// size-keyed index.
+	r, ok = resolveReuse(FileInfo{RelPath: "other", Size: 99}, hashes, byRel, true, false, 1024)
+	if !ok || r.FileSHA256 != "ccc" {
+		t.Errorf("path fallback failed: %+v ok=%v", r, ok)
+	}
+
+	// A path match with a different size is rejected when the file exists.
+	if r, ok = resolveReuse(FileInfo{RelPath: "x.bin", Size: 11}, hashes, byRel, true, false, 1024); ok {
+		t.Errorf("path fallback with differing size and existing path should be rejected: %+v", r)
+	}
+
+	// --ignore-size prefers the relative-path index and ignores sizes.
+	r, ok = resolveReuse(FileInfo{RelPath: "x.bin", Size: 11}, hashes, byRel, true, true, 1024)
+	if !ok || r.FileSHA256 != "bbb" {
+		t.Errorf("--ignore-size path lookup failed: %+v ok=%v", r, ok)
+	}
+
+	// SHA-256 piece hashes are kept when the metalink piece length is known.
+	if r, ok = resolveReuse(FileInfo{RelPath: "x.bin", Size: 10}, hashes, nil, true, false, 1024); !ok || len(r.SHA256PieceHashes) != 2 {
+		t.Errorf("known piece length should keep piece hashes: %+v ok=%v", r, ok)
+	}
+
+	// ...and stripped when the metalink piece length is unknown, so the file
+	// gets rehashed instead of emitting <pieces> with mismatched hashes.
+	if r, ok = resolveReuse(FileInfo{RelPath: "x.bin", Size: 10}, hashes, nil, true, false, 0); !ok || len(r.SHA256PieceHashes) != 0 {
+		t.Errorf("unknown piece length should strip piece hashes: %+v ok=%v", r, ok)
+	}
+
+	// --ignore-size must not bypass that strip.
+	if r, ok = resolveReuse(FileInfo{RelPath: "x.bin", Size: 10}, hashes, nil, true, true, 0); !ok || len(r.SHA256PieceHashes) != 0 {
+		t.Errorf("--ignore-size must not bypass the piece-length guard: %+v ok=%v", r, ok)
+	}
+}
+
+func TestCanSkipReuse(t *testing.T) {
+	reused := FileHashResult{FileSHA256: "x", SHA256PieceHashes: []string{"p"}}
+	if !canSkipReuse(FileInfo{Size: 12}, reused, true, true, true) {
+		t.Error("full reuse should allow skipping")
+	}
+	// A file hash without valid pieces cannot feed the metalink.
+	if canSkipReuse(FileInfo{Size: 12}, FileHashResult{FileSHA256: "x"}, true, true, true) {
+		t.Error("file without valid pieces must be rehashed when the metalink needs it")
+	}
+	// When no torrent output is needed, torrent reusability is irrelevant.
+	if !canSkipReuse(FileInfo{Size: 12}, reused, true, false, false) {
+		t.Error("skip should not depend on torrent reuse when no torrent output is emitted")
+	}
+	// An empty file has a valid file-level SHA-256 with no pieces at all.
+	if !canSkipReuse(FileInfo{Size: 0}, FileHashResult{FileSHA256: "x"}, true, true, true) {
+		t.Error("empty file with its file hash should be skippable")
+	}
+}
+
+func TestImportedHashCount(t *testing.T) {
+	imp := &ReusableMetadata{
+		HashResults: map[int64]FileHashResult{
+			10: {RelPath: "a.bin", Size: 10},
+			20: {RelPath: "b.bin", Size: 20},
+		},
+		MetaByRel: map[string]FileHashResult{
+			"a.bin": {RelPath: "a.bin", Size: 10},
+			"x.bin": {RelPath: "x.bin", Size: 7},
+			"y.bin": {RelPath: "y.bin", Size: 7},
+		},
+	}
+	if got := importedHashCount(imp); got != 4 {
+		t.Errorf("importedHashCount = %d; want 4 (a, b, x, y)", got)
+	}
+
+	// All files colliding by size: the size-keyed map is empty but the
+	// path-indexed entries are still distinct imports.
+	collide := &ReusableMetadata{
+		HashResults: map[int64]FileHashResult{},
+		MetaByRel: map[string]FileHashResult{
+			"a.bin": {RelPath: "a.bin", Size: 555},
+			"b.bin": {RelPath: "b.bin", Size: 555},
+		},
+	}
+	if got := importedHashCount(collide); got != 2 {
+		t.Errorf("importedHashCount (all collisions) = %d; want 2", got)
+	}
+
+	// A metalink + torrent pair for the same file is one import even though the
+	// merged size-keyed record may carry the torrent's path while the
+	// path-indexed record carries the metalink's package-qualified path.
+	merged := &ReusableMetadata{
+		HashResults: map[int64]FileHashResult{
+			10: {RelPath: "data.bin", Size: 10, FileSHA256: "m", SHA1PieceHashes: []string{"t"}},
+		},
+		MetaByRel: map[string]FileHashResult{
+			"data.bin": {RelPath: "pkg/data.bin", Size: 10, FileSHA256: "m"},
+		},
+	}
+	if got := importedHashCount(merged); got != 1 {
+		t.Errorf("importedHashCount (merged metalink+torrent) = %d; want 1", got)
 	}
 }
