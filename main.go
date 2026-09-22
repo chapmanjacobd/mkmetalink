@@ -159,10 +159,10 @@ type TorrentFileInfo struct {
 }
 
 var CLI struct {
-	Sign       string   `help:"If set, pass this GPG --local-user (key id) to sign" optional:"" aliases:"pgp,gpg"`
-	Tracker    string   `help:"Tracker URL for generated torrent's announce (default privtracker)" default:"https://privtracker.com/metalink/announce"`
+	Sign       string   `help:"If set, sign the generated Metalink with this GPG --local-user (key id)" optional:"" aliases:"pgp,gpg"`
+	Tracker    string   `help:"Tracker URL for the torrent's announce (default privtracker)" default:"https://privtracker.com/metalink/announce"`
 	OutDir     string   `help:"Optional output directory for generated files. Default: input file's parent directory or input directory" short:"o" optional:""`
-	Modify     string   `help:"Reuse hashes from an existing metalink/torrent (matches by file size)" type:"path" placeholder:"PATH" optional:""`
+	Modify     string   `help:"Reuse hashes from an existing Metalink or torrent. Files match by file size" type:"path" placeholder:"PATH" optional:""`
 	IgnoreSize bool     `help:"With --modify, reuse hashes even when the file size no longer matches the metadata" name:"ignore-size" optional:""`
 	Mirrors    []string `name:"mirrors" short:"m" help:"HTTPS mirrors (if directory: base URLs)"`
 
@@ -184,15 +184,16 @@ type FileHashResult struct {
 }
 
 type ReusableMetadata struct {
-	// Size-keyed hash results. Same-size files with different content collide
-	// and are absent from this map; MetaByRel resolves those by relative path.
+	// Hashes keyed by file size. Two same-size files with different content
+	// collide and are removed from this map; MetaByRel resolves them by path.
 	HashResults map[int64]FileHashResult
-	// Metalink files in document order, keyed by package-relative path so that
-	// files with colliding sizes can still be matched when the layout is kept.
+	// Hashes keyed by package-relative path. This resolves same-size files
+	// that collide in HashResults when the file layout is unchanged.
 	MetaByRel map[string]FileHashResult
+	// Files from the Metalink, in document order.
 	MetaFiles []FileInfo
-	// Piece length the metalink's SHA-256 pieces were computed under, or 0 if
-	// the metalink has no pieces or the files disagree on the length.
+	// Piece size used for the Metalink's SHA-256 pieces. 0 when the Metalink
+	// has no pieces, or when the files disagree on the size.
 	MetaPieceLength int64
 	Torrent         *Torrent
 	MetaFound       bool
@@ -220,11 +221,11 @@ type MultiHasher struct {
 	results []FileHashResult
 }
 
-// NewMultiHasher returns a hasher that computes both stream hashes at once.
-// metaPieceSize fixes the SHA-256 per-file pieces (metalink) and
-// torrentPieceSize fixes the SHA-1 stream crossing file boundaries (torrent).
-// They are independent and may differ, e.g. when the imported metalink and
-// torrent record different piece lengths.
+// NewMultiHasher returns a hasher that computes both streams at once.
+// metaPieceSize fixes the SHA-256 per-file pieces (Metalink) and
+// torrentPieceSize fixes the SHA-1 stream that crosses file boundaries
+// (torrent). They are independent and may differ, for example when the
+// imported Metalink and torrent record different piece sizes.
 func NewMultiHasher(metaPieceSize, torrentPieceSize int64) *MultiHasher {
 	return &MultiHasher{
 		metaPieceSize:       metaPieceSize,
@@ -395,19 +396,21 @@ func loadReusableMetadata(path string) (*ReusableMetadata, error) {
 	res := make(map[int64]FileHashResult)
 	collisions := make(map[int64]bool)
 
-	// Helper to add results with collision detection
+	// addResult adds one result. When two entries for the same size disagree
+	// in content, the size is marked as a collision and removed.
 	addResult := func(size int64, r FileHashResult) {
 		if collisions[size] {
 			return
 		}
 		if existing, ok := res[size]; ok {
-			// If it's the exact same hash/pieces, it's just a duplicate entry, ignore.
-			// But if any hash differs, it's a collision.
+			// Identical hash or pieces means the entry is a duplicate and is
+			// merged. Different hashes for the same size mean the files have
+			// different content; mark the size as a collision.
 			collision := false
 			if existing.FileSHA256 != "" && r.FileSHA256 != "" && existing.FileSHA256 != r.FileSHA256 {
 				collision = true
 			}
-			// If they have different pieces of the SAME type, collision.
+			// Different pieces of the same type also mark a collision.
 			if len(existing.SHA256PieceHashes) > 0 && len(r.SHA256PieceHashes) > 0 && !equalSlices(existing.SHA256PieceHashes, r.SHA256PieceHashes) {
 				collision = true
 			}
@@ -421,7 +424,7 @@ func loadReusableMetadata(path string) (*ReusableMetadata, error) {
 				return
 			}
 
-			// Merge them
+			// Merge the missing hash kinds into r.
 			if r.FileSHA256 == "" {
 				r.FileSHA256 = existing.FileSHA256
 			}
@@ -485,14 +488,14 @@ func loadReusableMetadata(path string) (*ReusableMetadata, error) {
 						key = strings.Join(parts[1:], "/")
 					}
 				}
-				// Index by package-relative path too, so same-size files that
-				// collide in the size-keyed map can still be matched exactly.
+				// Index by package-relative path as well, so same-size files that
+				// collide in the size-keyed map still match exactly.
 				importedByRel[filepath.FromSlash(key)] = r
 			}
 		}
 	}
 
-	// 2. Try loading Torrent
+	// Try loading the torrent.
 	var torFound bool
 	var tor *Torrent
 	torPath := base + ".torrent"
@@ -574,8 +577,8 @@ func filesFromReusableMetadata(path string, hashes map[int64]FileHashResult, met
 		}
 	}
 
-	// Prefer the metalink's own file list when available: the size-keyed hash
-	// map cannot represent multiple distinct files that share a size.
+	// Prefer the Metalink's own file list: the size-keyed hash map cannot
+	// represent multiple distinct files that share a size.
 	var imported []FileInfo
 	if len(metaFiles) > 0 {
 		imported = append(imported, metaFiles...)
@@ -593,12 +596,12 @@ func filesFromReusableMetadata(path string, hashes map[int64]FileHashResult, met
 	}
 
 	// A single metadata file may still represent a directory when its recorded
-	// path nests below the package root (e.g. "<pkg>/sub/only.txt").
+	// path nests below the package root, for example "<pkg>/sub/only.txt".
 	isDir := len(imported) > 1 || strings.HasSuffix(path, string(os.PathSeparator)) || strings.Contains(filepath.ToSlash(imported[0].RelPath), "/")
 
-	// This tool emits "<package>/<path>" in the metalink. If every metadata
+	// mkmetalink emits "<package>/<path>" in the Metalink. When every metadata
 	// file shares the same leading directory, strip that package prefix so the
-	// result is independent of the metadata file's own (possibly renamed) name.
+	// result does not depend on the metadata's own (possibly renamed) name.
 	stripPrefix := ""
 	if isDir {
 		relPaths := make([]string, len(imported))
@@ -625,11 +628,11 @@ func filesFromReusableMetadata(path string, hashes map[int64]FileHashResult, met
 	return files, isDir, nil
 }
 
-// canReuseTorrentPieces reports whether the imported torrent's whole SHA-1 piece
-// blob can be emitted as-is. It requires the piece length to match the one being
-// emitted and, without --ignore-size, the on-disk file layout (ordering and
-// sizes) to match the torrent's file list. --ignore-size explicitly trusts the
-// user that the content is unchanged even when sizes have drifted.
+// canReuseTorrentPieces reports whether the imported torrent's SHA-1 pieces
+// can be written as-is into the output. The torrent piece size must match.
+// Without --ignore-size, the file layout (order and sizes) must also match
+// the torrent's file list. With --ignore-size, mkmetalink trusts that the
+// content is unchanged even when the sizes have drifted.
 func canReuseTorrentPieces(files []FileInfo, tor *Torrent, torrentPieceSize int64, ignoreSize bool) bool {
 	if tor == nil || tor.Info.PieceLength != torrentPieceSize {
 		return false
@@ -637,7 +640,7 @@ func canReuseTorrentPieces(files []FileInfo, tor *Torrent, torrentPieceSize int6
 	if ignoreSize {
 		return true
 	}
-	if len(files) == 1 && tor.Info.Length == files[0].Size {
+	if len(files) == 1 && len(tor.Info.Files) == 0 && tor.Info.Length == files[0].Size {
 		return true
 	}
 	if len(files) == len(tor.Info.Files) {
@@ -651,16 +654,14 @@ func canReuseTorrentPieces(files []FileInfo, tor *Torrent, torrentPieceSize int6
 	return false
 }
 
-// resolveReuse looks up imported metadata for a file. By default the size-keyed
-// index is authoritative; the relative-path index is only a fallback, and a path
-// match with a different size is rejected when the file exists. With
-// --ignore-size sizes are untrustworthy, so the relative-path index is consulted
-// first and the size-keyed index only used as a fallback.
+// resolveReuse finds imported hashes for a file. By default, the file size
+// selects the hashes; the relative path is only a fallback. A path match with
+// a different size is rejected when the file exists. With --ignore-size, the
+// size is not trusted, so the path is tried first.
 //
-// metaPieceLength is the single piece length recorded by the metalink (0 when
-// unknown). Reusable SHA-256 piece hashes are dropped when it is unknown,
-// because reusing them would emit a <pieces> whose length does not match the
-// hashes.
+// metaPieceLength is the Metalink's piece size (0 when unknown). SHA-256
+// piece hashes are dropped when it is unknown; reusing them would emit a
+// <pieces> whose size does not match the hashes.
 func resolveReuse(fi FileInfo, hashes map[int64]FileHashResult, byRel map[string]FileHashResult, pathExists, ignoreSize bool, metaPieceLength int64) (FileHashResult, bool) {
 	var reused FileHashResult
 	ok := false
@@ -682,26 +683,31 @@ func resolveReuse(fi FileInfo, hashes map[int64]FileHashResult, byRel map[string
 		}
 	}
 	if ok && len(reused.SHA256PieceHashes) > 0 && metaPieceLength == 0 {
-		log.Printf("Warning: SHA-256 piece hashes for %s were generated with a different piece size; rehashing pieces", fi.RelPath)
+		// The piece hashes can never be written: the Metalink's piece size is
+		// unknown or inconsistent. When the file exists it is re-read (and its
+		// pieces re-hashed); when the path is missing the file is dropped.
+		if pathExists {
+			log.Printf("Warning: SHA-256 piece hashes for %s were generated with a different piece size; rehashing pieces", fi.RelPath)
+		} else {
+			log.Printf("Warning: SHA-256 piece hashes for %s were generated with a different piece size; cannot reuse the file", fi.RelPath)
+		}
 		reused.SHA256PieceHashes = nil
 	}
 	return reused, ok
 }
 
-// canSkipReuse reports whether a file can be emitted from imported hashes
-// without reading it: its file-level SHA-256 (with valid pieces for a non-empty
-// file) must be present when the metalink needs it, and the torrent must be
-// reusable as a whole when the torrent needs it.
+// canSkipReuse reports whether a file can be written from the imported hashes
+// without reading it. The file must have a file SHA-256 hash (with pieces,
+// unless the file is empty) when the Metalink needs it, and the torrent as a
+// whole must be reusable when the torrent needs it.
 func canSkipReuse(fi FileInfo, reused FileHashResult, needSHA256, needSHA1, canReuseTorrent bool) bool {
 	hasSHA256 := reused.FileSHA256 != "" && (len(reused.SHA256PieceHashes) > 0 || fi.Size == 0)
 	return (!needSHA256 || hasSHA256) && (!needSHA1 || canReuseTorrent)
 }
 
-// importedHashCount returns the number of distinct files' hashes imported.
-// The size-keyed index holds one record per non-colliding size; colliding
-// same-size files are dropped from it and survive only as relative-path
-// entries, so every MetaByRel record whose size is absent from the size-keyed
-// index counts as an additional distinct import.
+// importedHashCount returns the number of imported files. The size-keyed map
+// holds one record per size without a collision. A path-indexed record whose
+// size is absent from the size-keyed map is an additional import.
 func importedHashCount(m *ReusableMetadata) int {
 	unique := len(m.HashResults)
 	for _, rec := range m.MetaByRel {
@@ -749,8 +755,8 @@ func main() {
 	var total int64
 	isDir := false
 
-	// Dereference the reusable metadata so downstream code can keep assuming
-	// plain maps/slices (which are safe when nil).
+	// Copy the imported metadata into plain fields. Nil maps and slices are
+	// safe for the lookups and iteration used below.
 	var importedHashes map[int64]FileHashResult
 	var importedByRel map[string]FileHashResult
 	var importedFiles []FileInfo
@@ -812,27 +818,26 @@ func main() {
 	torrentPieceSize := calculatePieceSize(total)
 
 	if CLI.Modify != "" {
-		// With --modify the piece sizes are always taken from the imported
-		// metadata so any reused piece hashes stay consistent with the emitted
-		// <pieces length> / piece length. They are never recomputed afterwards:
-		// files are only dropped under --modify, and recomputing would orphan
-		// the reused piece hashes.
-		//
-		// The metalink (per-file SHA-256) and torrent (SHA-1 across file
-		// boundaries) streams are independent: each adopts its own imported
-		// piece length so reused hashes stay valid even when the imported
-		// metadata disagree with each other or with the calculated size.
+		// Under --modify, the piece sizes come from the imported metadata.
+		// Recomputing them would break the reused piece hashes, so files are
+		// only dropped, never re-pieced. The Metalink (per-file SHA-256) and
+		// torrent (SHA-1 across file boundaries) streams are independent; each
+		// adopts its own imported piece size.
 		if importedTorrent != nil && torrentPieceSize != importedTorrent.Info.PieceLength {
-			fmt.Printf("Note: Adoption of imported torrent piece size %s (was %s)\n", formatBytes(importedTorrent.Info.PieceLength), formatBytes(torrentPieceSize))
+			fmt.Printf("Note: using imported torrent piece size %s (calculated %s)\n", formatBytes(importedTorrent.Info.PieceLength), formatBytes(torrentPieceSize))
 			torrentPieceSize = importedTorrent.Info.PieceLength
 		}
 		if importedPieceLength > 0 && metaPieceSize != importedPieceLength {
-			fmt.Printf("Note: Adoption of imported metalink piece size %s (was %s)\n", formatBytes(importedPieceLength), formatBytes(metaPieceSize))
+			fmt.Printf("Note: using imported Metalink piece size %s (calculated %s)\n", formatBytes(importedPieceLength), formatBytes(metaPieceSize))
 			metaPieceSize = importedPieceLength
 		}
 	}
 
-	fmt.Printf("Total size: %s, meta piece size: %s, torrent piece size: %s, %d files\n", formatBytes(total), formatBytes(metaPieceSize), formatBytes(torrentPieceSize), len(files))
+	if metaPieceSize == torrentPieceSize {
+		fmt.Printf("Total size: %s, piece size: %s, %d files\n", formatBytes(total), formatBytes(metaPieceSize), len(files))
+	} else {
+		fmt.Printf("Total size: %s, Metalink piece size: %s, torrent piece size: %s, %d files\n", formatBytes(total), formatBytes(metaPieceSize), formatBytes(torrentPieceSize), len(files))
+	}
 
 	canReuseTorrent := canReuseTorrentPieces(files, importedTorrent, torrentPieceSize, CLI.IgnoreSize)
 
@@ -842,10 +847,10 @@ func main() {
 	startTime := time.Now()
 	var totalBytesProcessed int64
 
-	// Reuse buffer across all files
+	// One read buffer shared across all files.
 	buf := make([]byte, CHUNK_SIZE)
 
-	skipped := make(map[string]bool)
+	dropped := make(map[string]bool)
 	for _, fi := range files {
 		full := CLI.Path
 		if isDir {
@@ -858,9 +863,8 @@ func main() {
 		if ok {
 			needSHA256 := (CLI.Modify == "" || metaFound)
 			needSHA1 := (CLI.Modify == "" || torFound)
-			// We can only skip if:
-			// 1. We don't need SHA256 OR we already have it from import
-			// 2. We don't need SHA1 OR we can reuse the BitTorrent pieces
+			// Skip reading only when the imported hashes cover the outputs
+			// that will be written.
 			if canSkipReuse(fi, reused, needSHA256, needSHA1, canReuseTorrent) {
 				status := "hashes"
 				if canReuseTorrent {
@@ -874,8 +878,8 @@ func main() {
 		}
 
 		if !pathExists {
-			log.Printf("Warning: cannot reuse metadata for %s (size %s); skipping file", fi.RelPath, formatBytes(fi.Size))
-			skipped[fi.RelPath] = true
+			log.Printf("Warning: cannot reuse metadata for %s (size %s); dropping file", fi.RelPath, formatBytes(fi.Size))
+			dropped[fi.RelPath] = true
 			continue
 		}
 
@@ -914,27 +918,25 @@ func main() {
 		fmt.Printf("  %.1f%% %.1f MiB/s   %s\n", progress, rate, fi.RelPath)
 	}
 
-	if len(skipped) > 0 {
+	if len(dropped) > 0 {
 		kept := files[:0]
 		for _, fi := range files {
-			if !skipped[fi.RelPath] {
+			if !dropped[fi.RelPath] {
 				kept = append(kept, fi)
 			}
 		}
 		files = kept
 		canReuseTorrent = false
 		if torFound {
-			log.Printf("Warning: omitting torrent output because %d file(s) could not be reused; the remaining pieces would not match the file layout", len(skipped))
+			log.Printf("Warning: omitting torrent output because %d file(s) could not be reused; the remaining pieces would not match the file layout", len(dropped))
 			torFound = false
 		}
 		if len(files) == 0 {
 			log.Fatalf("no files could be reused from %s", CLI.Modify)
 		}
-		// Recompute totals after dropping files so the reported sizes and
-		// progress reflect only the files actually emitted. The piece size is
-		// intentionally not recomputed: files can only be dropped while
-		// running with --modify, where the piece size is fixed by the imported
-		// metadata to keep any reused piece hashes valid.
+		// Recompute the totals so the report only reflects the emitted files.
+		// The piece size is not recomputed: under --modify it stays fixed by
+		// the imported metadata, to keep the reused piece hashes valid.
 		total = 0
 		for _, fi := range files {
 			total += fi.Size
@@ -942,7 +944,7 @@ func main() {
 	}
 
 	if canReuseTorrent {
-		fmt.Println("Reusing torrent pieces from existing file")
+		fmt.Println("Reusing torrent pieces from the imported torrent")
 		mh.SetTorrentPieces([]byte(importedTorrent.Info.Pieces))
 	} else {
 		mh.Finalize()
@@ -962,6 +964,13 @@ func main() {
 	var writeTorrent bool
 	if CLI.Modify == "" || torFound {
 		writeTorrent = true
+	}
+
+	// Refuse empty output. A Metalink or torrent with no files is never useful,
+	// so do not write one even when the input metadata is empty or a rename
+	// removes the last reusable file.
+	if len(files) == 0 {
+		log.Fatalf("refusing to write empty output: no files to emit")
 	}
 
 	// Build MetaLink v4
@@ -1009,10 +1018,10 @@ func main() {
 			},
 			URLs: urls,
 		}
-		// Only reference the torrent from the metalink when one is actually
-		// emitted. Under --modify the torrent can be suppressed (metalink-only
-		// import, or files dropped breaking the piece layout); a dangling
-		// metaurl would point clients at a file that never exists.
+		// Reference the torrent only when it is written. Under --modify, the
+		// torrent can be omitted (Metalink-only import, or dropped files that
+		// break the piece layout). A dangling metaurl points clients at a file
+		// that never exists.
 		if writeTorrent {
 			mf.Metaurls = []MetaURL{
 				{

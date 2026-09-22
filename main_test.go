@@ -615,6 +615,19 @@ func TestCanReuseTorrentPieces(t *testing.T) {
 	if canReuseTorrentPieces([]FileInfo{{RelPath: "x", Size: 200}}, single, 1024, false) {
 		t.Error("differing single-file length should block torrent piece reuse")
 	}
+
+	// A multi-file torrent omits Length, so it must not match a lone empty
+	// file via the single-file branch.
+	multi := &Torrent{Info: TorrentInfo{
+		PieceLength: 1024,
+		Files: []TorrentFileInfo{
+			{Length: 0, Path: []string{"empty"}},
+			{Length: 6, Path: []string{"b"}},
+		},
+	}}
+	if canReuseTorrentPieces([]FileInfo{{RelPath: "empty", Size: 0}}, multi, 1024, false) {
+		t.Error("multi-file torrent must not match a single empty file")
+	}
 }
 
 func TestResolveReuse(t *testing.T) {
